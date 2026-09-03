@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>生词本</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">📖</span>
+        <h1>生词本</h1>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-accent" id="btnAdd">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+          <span>记一个词</span>
+        </button>
+        <button class="btn btn-ghost" id="btnExport" title="导出备份文件">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>备份</span>
+        </button>
+        <button class="btn btn-ghost" id="btnImport" title="从备份文件导入">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9m0 0 4 4m-4-4-4 4M4 7V4h16v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>导入</span>
+        </button>
+        <button class="icon-btn" id="btnTheme" title="切换深色 / 浅色模式" aria-label="切换深色浅色"></button>
+      </div>
+    </header>
+
+    <main>
+      <div class="stats-strip" id="statsStrip"></div>
+
+      <section class="toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="searchInput" type="search" placeholder="搜索单词 / 释义 / 原句…" aria-label="搜索" autocomplete="off">
+        </div>
+        <div class="tabs" id="tabs" role="tablist" aria-label="筛选"></div>
+        <label class="sort-wrap">
+          排序
+          <select id="sortSelect">
+            <option value="newest">最近记录</option>
+            <option value="alpha">字母 A–Z</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="list-wrap">
+        <div class="word-list" id="wordList"></div>
+        <div class="empty-state" id="emptyState" hidden></div>
+      </section>
+
+      <footer class="foot">
+        <span>在任意界面按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> 可快速记录</span>
+        <span id="storageInfo"></span>
+      </footer>
+    </main>
+  </div>
+
+  <!-- 编辑弹窗 -->
+  <dialog id="editorDialog" class="modal">
+    <form id="wordForm" novalidate>
+      <div class="modal-head">
+        <h2 id="editorTitle">记一个词</h2>
+        <button type="button" class="icon-btn close-btn" data-close="editorDialog" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field word-field">
+          <label for="fWord">单词</label>
+          <div class="word-line">
+            <input id="fWord" class="word-input" type="text" spellcheck="false" autocomplete="off" placeholder="例如 serendipity" required>
+            <button type="button" class="icon-btn speak-btn" id="btnSpeak" title="朗读单词" aria-label="朗读">🔊</button>
+            <button type="button" class="btn btn-soft" id="btnLookup" title="联网补全音标与词典释义">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              查词典
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="fSentence">记录时的原句 <span class="label-hint">（AI 会结合这句话讲解）</span></label>
+          <textarea id="fSentence" rows="2" placeholder="你是在哪句话里遇到它的？"></textarea>
+        </div>
+
+        <div class="ai-panel" id="aiPanel" hidden>
+          <div class="ai-status" id="aiStatus"></div>
+          <div class="ai-fields">
+            <div class="field">
+              <label for="fInContext">① 在这个句子里，它的意思是</label>
+              <textarea id="fInContext" rows="2"></textarea>
+            </div>
+            <div class="field">
+              <label for="fWhy">② 为什么是这个意思</label>
+              <textarea id="fWhy" rows="2"></textarea>
+            </div>
+            <div class="field">
+              <label for="fRephrase">③ 换一种说法，这句话可以讲成</label>
+              <textarea id="fRephrase" rows="2"></textarea>
+            </div>
+            <div class="field">
+              <label for="fTip">④ 记这个词的小技巧</label>
+              <textarea id="fTip" rows="2"></textarea>
+            </div>
+          </div>
+          <button type="button" class="btn btn-soft" id="btnExplain">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v14m0 0 4-4m-4 4-4-4M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            AI 重新讲解
+          </button>
+        </div>
+
+        <details class="more-fields" id="moreFields">
+          <summary>音标、中文释义、英文释义（词典补充，可改）</summary>
+          <div class="field">
+            <label for="fPhonetic">音标</label>
+            <input id="fPhonetic" type="text" spellcheck="false" placeholder="例如 /ˌserənˈdɪpəti/" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="fTranslation">中文释义</label>
+            <input id="fTranslation" type="text" placeholder="例如：机缘巧合" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="fDefinitions">英文释义 <span class="label-hint">（每行一条）</span></label>
+            <textarea id="fDefinitions" rows="3"></textarea>
+          </div>
+          <div class="field">
+            <label for="fNote">备注 / 来源</label>
+            <input id="fNote" type="text" placeholder="例如：论文《xxx》第 3 页（可选）" autocomplete="off">
+          </div>
+        </details>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-danger-ghost" id="btnDelete" hidden>删除</button>
+        <span class="foot-spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close="editorDialog">取消</button>
+        <button type="submit" class="btn btn-accent" id="btnSave">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 导入确认弹窗 -->
+  <dialog id="importDialog" class="modal small-modal">
+    <div class="modal-head"><h2>导入词库</h2></div>
+    <div class="modal-body">
+      <p id="importMessage"></p>
+      <p class="import-hint">合并：保留当前词库，按单词去重。<br>覆盖：清空当前词库，替换为备份内容。</p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close="importDialog">取消</button>
+      <span class="foot-spacer"></span>
+      <button type="button" class="btn btn-soft" id="btnImportMerge">合并导入</button>
+      <button type="button" class="btn btn-danger" id="btnImportReplace">覆盖导入</button>
+    </div>
+  </dialog>
+
+  <!-- 通用确认弹窗 -->
+  <dialog id="confirmDialog" class="modal small-modal">
+    <div class="modal-head"><h2 id="confirmTitle">确认</h2></div>
+    <div class="modal-body"><p id="confirmMessage"></p></div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" id="confirmCancel">取消</button>
+      <span class="foot-spacer"></span>
+      <button type="button" class="btn btn-danger" id="confirmOk">确认</button>
+    </div>
+  </dialog>
+
+  <div class="toast-zone" id="toastZone" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
