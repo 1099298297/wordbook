@@ -425,10 +425,22 @@
   async function runAiExplain() {
     const w = curWord();
     if (!w || editing.busy) return;
-    const sc = w.sentences[Math.min(editing.sceneIndex, w.sentences.length - 1)];
+    const idx = Math.min(editing.sceneIndex, w.sentences.length - 1);
+    let sc = w.sentences[idx];
+    const newText = $id('fSentence').value.trim();
     editing.busy = true;
     renderAiStatus(w, sc);
     try {
+      if (newText !== sc.text) {
+        const dr = await api(`/api/words/${w.id}/scenes/${sc.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ text: newText }),
+        });
+        const nw = normalize(dr.word);
+        const wi = words.findIndex((x) => x.id === nw.id);
+        if (wi >= 0) words[wi] = nw;
+        sc = nw.sentences.find((s) => s.id === sc.id) || nw.sentences[0];
+      }
       const d = await api(`/api/words/${w.id}/scenes/${sc.id}/explain`, { method: 'POST' });
       const nw = normalize(d.word);
       const i = words.findIndex((x) => x.id === nw.id);
@@ -440,7 +452,8 @@
       toast('讲解失败：' + (e.message || ''), { type: 'error', ms: 5000 });
     } finally {
       editing.busy = false;
-      renderAiStatus(curWord(), curWord() && curWord().sentences[Math.min(editing.sceneIndex, curWord().sentences.length - 1)]);
+      const cw = curWord();
+      renderAiStatus(cw, cw && cw.sentences[Math.min(editing.sceneIndex, cw.sentences.length - 1)]);
     }
   }
 
