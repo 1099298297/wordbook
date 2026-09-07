@@ -541,7 +541,7 @@ public class CaptureWindow : Window
     private bool RowDone(JsonObject w)
     {
         if (AnyMeaning(w)) return true;
-        var status = w["ai"]?["status"]?.GetValue<string>() ?? "";
+        var status = FirstSceneAi(w)?["status"]?.GetValue<string>() ?? "";
         if (status == "pending") return false;
         return _pollTicks >= 14; // 给词典接口留出超时时间
     }
@@ -550,10 +550,16 @@ public class CaptureWindow : Window
     {
         if (!string.IsNullOrWhiteSpace(w["translation"]?.GetValue<string>())) return true;
         if (w["definitions"] is JsonArray defs && defs.Count > 0) return true;
-        var ai = w["ai"];
+        var ai = FirstSceneAi(w);
         if (ai == null) return false;
         return !string.IsNullOrWhiteSpace(ai["inContext"]?.GetValue<string>())
             || !string.IsNullOrWhiteSpace(ai["why"]?.GetValue<string>());
+    }
+
+    private static JsonObject FirstSceneAi(JsonObject w)
+    {
+        var scene = (w["sentences"] as JsonArray)?.FirstOrDefault() as JsonObject;
+        return scene?["ai"] as JsonObject;
     }
 
     private void RenderResult(Dictionary<string, JsonObject> map)
@@ -610,7 +616,7 @@ public class CaptureWindow : Window
             if (!string.IsNullOrWhiteSpace(trans)) lines.Add("中文释义：" + trans);
             if (w["definitions"] is JsonArray defs && defs.Count > 0 && string.IsNullOrWhiteSpace(trans))
                 lines.Add("英文释义：" + defs[0]?.GetValue<string>());
-            var ai = w["ai"];
+            var ai = FirstSceneAi(w);
             var aiStatus = ai?["status"]?.GetValue<string>() ?? "";
             var inContext = ai?["inContext"]?.GetValue<string>() ?? "";
             if (aiStatus == "pending") lines.Add("AI 讲解中…");

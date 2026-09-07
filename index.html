@@ -81,9 +81,20 @@
             </button>
           </div>
         </div>
+        <div class="scene-nav">
+          <button type="button" class="icon-btn nav-btn" id="scenePrev" title="上一句" aria-label="上一句">←</button>
+          <div class="scene-meta">
+            <span id="sceneIndex">第 1 / 1 句</span>
+            <span id="sceneDate"></span>
+          </div>
+          <button type="button" class="icon-btn nav-btn" id="sceneNext" title="下一句" aria-label="下一句">→</button>
+        </div>
         <div class="field">
-          <label for="fSentence">记录时的原句 <span class="label-hint">（再次遇到同一词会自动追加为新场景）</span></label>
+          <label for="fSentence">这句话 <span class="label-hint">（可编辑；再次遇到同一词会自动追加为新句子）</span></label>
           <textarea id="fSentence" rows="2" placeholder="你是在哪句话里遇到它的？"></textarea>
+        </div>
+        <div class="scene-actions">
+          <button type="button" class="btn btn-danger-ghost" id="btnDeleteScene" hidden>删除这句场景</button>
         </div>
 
         <div class="ai-panel" id="aiPanel" hidden>
@@ -108,7 +119,7 @@
           </div>
           <button type="button" class="btn btn-soft" id="btnExplain">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v14m0 0 4-4m-4 4-4-4M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            AI 重新讲解
+            AI 讲解这句
           </button>
         </div>
 

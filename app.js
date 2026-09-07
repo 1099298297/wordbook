@@ -6,10 +6,11 @@
   const $id = (id) => document.getElementById(id);
   const DAY = 86400000;
   const LS_THEME = 'wordbook.theme';
+  const STATUS_LABEL = { done: '已讲解', pending: '讲解中…', error: '待重试', none: '未讲解' };
 
   let words = [];
   const ui = { filter: 'all', sort: 'newest', query: '' };
-  const editing = { id: null, busy: false };
+  const editing = { id: null, sceneIndex: 0, busy: false };
   let fileWords = null;
   let confirmResolver = null;
 
@@ -20,8 +21,8 @@
   const now = () => Date.now();
   const lines = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean);
 
-  function aiOf(w) {
-    const a = w.ai || {};
+  function aiOf(sc) {
+    const a = (sc && sc.ai) || {};
     return {
       status: a.status || 'none',
       inContext: a.inContext || '',
@@ -32,6 +33,16 @@
     };
   }
 
+  function normalizeScene(sc, i) {
+    if (!sc || typeof sc !== 'object') return null;
+    if (!sc.id) sc.id = 's' + (i || 0) + Math.random().toString(36).slice(2, 8);
+    sc.text = sc.text || '';
+    sc.addedAt = Number(sc.addedAt) || now();
+    sc.updatedAt = Number(sc.updatedAt) || sc.addedAt;
+    sc.ai = aiOf(sc);
+    return sc;
+  }
+
   function normalize(w) {
     if (!w || typeof w !== 'object') return null;
     if (!w.word || !String(w.word).trim()) return null;
@@ -40,26 +51,48 @@
     w.translation = w.translation || '';
     w.definitions = Array.isArray(w.definitions) ? w.definitions.filter(Boolean) : [];
     w.audio = w.audio || '';
-    w.sentence = w.sentence || '';
-    w.sentences = Array.isArray(w.sentences) ? w.sentences.map(String).filter(Boolean) : (w.sentence ? [w.sentence] : []);
-    if (!w.sentence && w.sentences.length) w.sentence = w.sentences[0];
     w.note = w.note || '';
-    w.ai = aiOf(w);
     w.createdAt = Number(w.createdAt) || now();
     w.updatedAt = Number(w.updatedAt) || w.createdAt;
+    w.sentences = (Array.isArray(w.sentences) ? w.sentences : [])
+      .map(normalizeScene).filter(Boolean)
+      .sort((a, b) => b.addedAt - a.addedAt);
+    if (!w.sentences.length) {
+      w.sentences = [{ id: 's' + Math.random().toString(36).slice(2, 8), text: '', addedAt: w.createdAt, updatedAt: w.createdAt, ai: aiOf({}) }];
+    }
+    w.sentence = w.sentences[0].text;
     return w;
   }
 
-  function fmtWhen(ts) {
+  function latestScene(w) { return w.sentences[0]; }
+
+  function wordAiStatus(w) {
+    const a = aiOf(latestScene(w));
+    const done = a.status === 'done' && (a.inContext || a.why || a.rephrase || a.tip);
+    return done ? 'done' : (a.status === 'error' ? 'error' : (a.status === 'pending' ? 'pending' : 'none'));
+  }
+
+  function fmtTime(ts) {
     const d = new Date(ts);
     const t = new Date();
     const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const diffDay = Math.round((startOf(t) - startOf(d)) / DAY);
-    if (diffDay === 0) return `今天 ${hm}`;
-    if (diffDay === 1) return `昨天 ${hm}`;
+    const so = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((so(t) - so(d)) / DAY);
+    if (diff === 0) return `今天 ${hm}`;
+    if (diff === 1) return `昨天 ${hm}`;
     if (d.getFullYear() === t.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
     return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+  }
+
+  function groupLabel(ts) {
+    const d = new Date(ts);
+    const t = new Date();
+    const so = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((so(t) - so(d)) / DAY);
+    const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
+    if (diff === 0) return `今天 · ${d.getMonth() + 1}月${d.getDate()}日 周${week}`;
+    if (diff === 1) return `昨天 · ${d.getMonth() + 1}月${d.getDate()}日 周${week}`;
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 周${week}`;
   }
 
   /* ---------- API ---------- */
@@ -72,7 +105,6 @@
     try { body = await res.json(); } catch (e) { /* 忽略 */ }
     if (!res.ok) {
       const err = new Error((body && body.error) || ('请求失败：' + res.status));
-      err.code = body && body.code;
       throw err;
     }
     return body || {};
@@ -82,11 +114,10 @@
     try {
       const d = await api('/api/data');
       const next = (d.words || []).map(normalize).filter(Boolean);
-      const sig = words.length + '|' + (words[0] ? words[0].updatedAt : '');
+      const sig = next.length + '|' + (next[0] ? next[0].updatedAt : '');
+      const oldSig = words.length + '|' + (words[0] ? words[0].updatedAt : '');
       words = next;
-      if (!silent || sig !== (next.length + '|' + (next[0] ? next[0].updatedAt : ''))) {
-        renderAll();
-      }
+      if (!silent || sig !== oldSig) renderAll();
     } catch (e) {
       if (!silent) toast('无法连接本机生词本服务：' + (e.message || ''), { type: 'error', ms: 6000 });
     }
@@ -124,87 +155,75 @@
       $id('confirmDialog').showModal();
     });
   }
-
-  /* ---------- 渲染 ---------- */
-  function aiStatus(w) {
-    const a = aiOf(w);
-    const done = a.status === 'done' && (a.inContext || a.why || a.rephrase || a.tip);
-    return done ? 'done' : (a.status === 'error' ? 'error' : (a.status === 'pending' ? 'pending' : 'none'));
+  function resolveConfirm(v) {
+    if (confirmResolver) { const r = confirmResolver; confirmResolver = null; r.resolve(v); }
   }
 
-  const AI_LABEL = { done: '已讲解', pending: '讲解中…', error: '讲解失败', none: '未讲解' };
-
+  /* ---------- 渲染 ---------- */
   function getFiltered() {
     let list = words.slice();
     const q = ui.query.trim().toLowerCase();
-    if (ui.filter === 'pending') list = list.filter((w) => aiStatus(w) === 'pending');
-    else if (ui.filter === 'error') list = list.filter((w) => aiStatus(w) === 'error');
-    else if (ui.filter === 'none') list = list.filter((w) => aiStatus(w) === 'none');
+    if (ui.filter !== 'all') list = list.filter((w) => wordAiStatus(w) === ui.filter);
     if (q) {
       list = list.filter((w) => {
-        const hay = [w.word, w.phonetic, w.translation, w.sentence, w.note,
-          w.ai.inContext, w.ai.why, w.ai.rephrase, w.ai.tip]
-          .concat(w.definitions || []).join('\n').toLowerCase();
+        const hay = [w.word, w.phonetic, w.translation, w.note]
+          .concat(w.definitions || [])
+          .concat(w.sentences.map((s) => s.text + ' ' + s.ai.inContext + ' ' + s.ai.why + ' ' + s.ai.rephrase + ' ' + s.ai.tip))
+          .join('\n').toLowerCase();
         return hay.includes(q);
       });
     }
     if (ui.sort === 'alpha') list.sort((a, b) => a.word.toLowerCase().localeCompare(b.word.toLowerCase()));
-    else list.sort((a, b) => b.createdAt - a.createdAt);
+    else list.sort((a, b) => (latestScene(b).addedAt || b.createdAt) - (latestScene(a).addedAt || a.createdAt));
     return list;
   }
 
   function renderStats() {
     const today = words.filter((w) => {
-      const d = new Date(w.createdAt), t = new Date();
+      const d = new Date(latestScene(w).addedAt || w.createdAt), t = new Date();
       return d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
     }).length;
-    const done = words.filter((w) => aiStatus(w) === 'done').length;
-    const pending = words.filter((w) => aiStatus(w) === 'pending').length;
+    const done = words.filter((w) => wordAiStatus(w) === 'done').length;
+    const pending = words.filter((w) => wordAiStatus(w) === 'pending').length;
     $id('statsStrip').innerHTML = words.length
-      ? `<span class="stat"><b>${words.length}</b>个生词</span>
-         <span class="stat">今日记录 <b>${today}</b></span>
+      ? `<span class="stat"><b>${words.length}</b>个单词</span>
+         <span class="stat">今天记 <b>${today}</b></span>
          <span class="stat">已讲解 <b>${done}</b></span>
-         ${pending ? `<span class="stat"><b style="color:var(--accent-ink)">${pending}</b>个正在讲解</span>` : ''}`
+         ${pending ? `<span class="stat"><b style="color:var(--accent-ink)">${pending}</b>个讲解中</span>` : ''}`
       : '<span class="stat">词库还空着，按 Ctrl+Alt+Shift+W 随时记一个</span>';
   }
 
   function renderTabs() {
-    const defs = [
-      ['all', '全部'],
-      ['pending', '讲解中'],
-      ['error', '待重试'],
-      ['none', '未讲解'],
-    ];
+    const defs = [['all', '全部'], ['pending', '讲解中'], ['error', '待重试'], ['none', '未讲解']];
     $id('tabs').innerHTML = defs.map(([key, label]) => {
-      const n = key === 'all' ? words.length : words.filter((w) => aiStatus(w) === key).length;
+      const n = key === 'all' ? words.length : words.filter((w) => wordAiStatus(w) === key).length;
       return `<button class="tab${ui.filter === key ? ' active' : ''}" data-filter="${key}" role="tab" aria-selected="${ui.filter === key}">
         ${label}${n ? `<span class="count">${n}</span>` : ''}</button>`;
     }).join('');
   }
 
   function rowHtml(w) {
-    const a = aiOf(w);
-    const st = aiStatus(w);
+    const sc = latestScene(w);
+    const a = aiOf(sc);
+    const st = wordAiStatus(w);
     const gloss = a.inContext || w.translation || (w.definitions && w.definitions[0]) || '';
-    const scenes = w.sentences && w.sentences.length ? w.sentences.length : (w.sentence ? 1 : 0);
-    const aiLine = gloss
-      ? `<div class="row-ai">${esc(gloss)}</div>`
-      : `<div class="row-ai placeholder">${st === 'pending' ? 'AI 正在结合原句讲解…' : st === 'error' ? '讲解失败，点开可重试' : '还没有讲解，点开填写原句后让 AI 讲'}</div>`;
+    const n = w.sentences.length;
     return `<div class="word-row" data-id="${esc(w.id)}" role="button" tabindex="0" aria-label="查看 ${esc(w.word)}">
       <div class="row-main">
         <div class="row-head">
           <span class="row-word">${esc(w.word)}</span>
           ${w.phonetic ? `<span class="row-phonetic">${esc(w.phonetic)}</span>` : ''}
-          ${scenes > 1 ? `<span class="row-scenes" title="多个句子场景">${scenes} 个场景</span>` : ''}
+          ${n > 1 ? `<span class="row-scenes" title="该词共记录 ${n} 句">${n} 句</span>` : ''}
           <button class="row-speak" data-act="speak" title="朗读">🔊</button>
         </div>
-        <div class="row-sentence">${esc(w.sentence)}</div>
-        ${aiLine}
+        <div class="row-sentence ${sc.text ? '' : 'empty'}">${esc(sc.text || '（还没有句子，点开补一句）')}</div>
+        ${gloss ? `<div class="row-ai">${esc(gloss)}</div>`
+          : `<div class="row-ai placeholder">${st === 'pending' ? 'AI 正在讲解…' : st === 'error' ? '讲解失败，点开可重试' : '暂无讲解'}</div>`}
       </div>
       <div class="row-side">
-        <span class="row-time">${fmtWhen(w.createdAt)}</span>
+        <span class="row-time">${fmtTime(sc.addedAt || w.createdAt)}</span>
         <span>
-          <span class="chip ai-${st}${st === 'pending' ? ' pending-dot' : ''}">${AI_LABEL[st]}</span>
+          <span class="chip ai-${st}${st === 'pending' ? ' pending-dot' : ''}">${STATUS_LABEL[st]}</span>
           ${st === 'error' ? ' <button class="retry-btn" data-act="retry">重试</button>' : ''}
         </span>
       </div>
@@ -213,19 +232,29 @@
 
   function renderList() {
     const list = getFiltered();
-    $id('wordList').innerHTML = list.map(rowHtml).join('');
+    const box = $id('wordList');
     const empty = $id('emptyState');
-    const show = words.length === 0 || list.length === 0;
-    empty.hidden = !show;
-    if (!show) return;
-    if (words.length === 0) {
-      empty.innerHTML = `<span class="empty-emoji">🪄</span>
-        <h3>词库还空着</h3>
-        <p>阅读时选中一句含生词的话复制，然后按热键记录；</p>
-        <div class="steps">① 复制单词或整句<br>② 按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> 弹出小框<br>③ 勾选生词回车，AI 会结合原句给你讲解</div>`;
-    } else {
-      empty.innerHTML = `<span class="empty-emoji">🔍</span><h3>没有匹配的记录</h3><p>换个关键词或筛选条件。</p>`;
+    if (list.length === 0) {
+      box.innerHTML = '';
+      empty.hidden = false;
+      empty.innerHTML = words.length === 0
+        ? `<span class="empty-emoji">🪄</span><h3>词库还空着</h3>
+           <p>复制单词或句子 → 按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> 记录。</p>`
+        : `<span class="empty-emoji">🔍</span><h3>没有匹配的记录</h3><p>换个关键词或筛选条件。</p>`;
+      return;
     }
+    empty.hidden = true;
+    let html = '';
+    let lastKey = '';
+    for (const w of list) {
+      const key = groupLabel(latestScene(w).addedAt || w.createdAt);
+      if (key !== lastKey) {
+        html += `<div class="day-heading">${key}</div>`;
+        lastKey = key;
+      }
+      html += rowHtml(w);
+    }
+    box.innerHTML = html;
   }
 
   function renderAll() {
@@ -253,121 +282,138 @@
   }
 
   /* ---------- 编辑器 ---------- */
+  function curWord() { return words.find((x) => x.id === editing.id); }
+
   function openEditor(idOrNull) {
     editing.id = idOrNull || null;
+    editing.sceneIndex = 0;
     editing.busy = false;
-    const w = idOrNull ? words.find((x) => x.id === idOrNull) : null;
+    const w = idOrNull ? curWord() : null;
     $id('editorTitle').textContent = w ? '编辑词条' : '记一个词';
     $id('btnDelete').hidden = !w;
+    $id('btnDeleteScene').hidden = !w;
     $id('fWord').value = w ? w.word : '';
-    $id('fSentence').value = w ? w.sentence : '';
     $id('fPhonetic').value = w ? w.phonetic : '';
     $id('fTranslation').value = w ? w.translation : '';
     $id('fDefinitions').value = w ? (w.definitions || []).join('\n') : '';
     $id('fNote').value = w ? w.note : '';
-    $id('fInContext').value = w ? w.ai.inContext : '';
-    $id('fWhy').value = w ? w.ai.why : '';
-    $id('fRephrase').value = w ? w.ai.rephrase : '';
-    $id('fTip').value = w ? w.ai.tip : '';
     $id('moreFields').open = false;
-    renderAiPanel(w);
+    fillScene(w);
+    updateSceneNav();
     $id('editorDialog').showModal();
     $id('fWord').focus();
     if ($id('fWord').value) $id('fWord').select();
   }
 
-  function renderAiPanel(w) {
-    const panel = $id('aiPanel');
-    const st = w ? aiStatus(w) : 'none';
-    const hasText = !!(w && (w.ai.inContext || w.ai.why || w.ai.rephrase || w.ai.tip));
-    const sentence = $id('fSentence').value.trim();
-    if (!w && !sentence) { panel.hidden = true; return; }
-    panel.hidden = false;
-    const box = $id('aiStatus');
-    const btn = $id('btnExplain');
-    btn.disabled = editing.busy;
-    if (editing.busy) {
-      box.className = 'ai-status busy';
-      box.textContent = 'AI 正在结合原句讲解，请稍候…（最长约 1 分钟）';
-    } else if (st === 'pending') {
-      box.className = 'ai-status busy';
-      box.textContent = '后台正在讲解中…';
-    } else if (st === 'done' && hasText) {
-      box.className = 'ai-status done';
-      box.textContent = 'AI 已结合原句讲解，以下内容可以修改。';
-    } else if (st === 'error') {
-      box.className = 'ai-status error';
-      box.textContent = '上次讲解失败：' + (w.ai.error || '未知原因');
-    } else {
-      box.className = 'ai-status';
-      box.textContent = sentence
-        ? '填好上方的原句后，可以让 AI 结合语境讲解这个词。'
-        : '没有原句也能讲：AI 会按一般词义和用法讲解；补上原句则可结合语境讲解。';
-    }
+  function fillScene(w) {
+    const sc = w ? w.sentences[Math.min(editing.sceneIndex, w.sentences.length - 1)] : null;
+    $id('fSentence').value = sc ? sc.text : '';
+    const a = aiOf(sc);
+    $id('fInContext').value = a.inContext;
+    $id('fWhy').value = a.why;
+    $id('fRephrase').value = a.rephrase;
+    $id('fTip').value = a.tip;
+    renderAiStatus(w, sc);
+    updateSceneNav();
   }
 
-  function aiPayload() {
-    return {
-      inContext: $id('fInContext').value.trim(),
-      why: $id('fWhy').value.trim(),
-      rephrase: $id('fRephrase').value.trim(),
-      tip: $id('fTip').value.trim(),
-    };
+  function updateSceneNav() {
+    const w = curWord();
+    const n = w ? w.sentences.length : 1;
+    const i = editing.id ? Math.min(editing.sceneIndex, n - 1) : 0;
+    $id('scenePrev').disabled = editing.id ? i <= 0 : true;
+    $id('sceneNext').disabled = editing.id ? i >= n - 1 : true;
+    $id('sceneIndex').textContent = editing.id ? `第 ${i + 1} / ${n} 句` : '第 1 / 1 句';
+    $id('sceneDate').textContent = editing.id ? fmtTime(w.sentences[i].addedAt) : '';
+    $id('btnDeleteScene').hidden = !editing.id || n <= 1;
+  }
+
+  function renderAiStatus(w, sc) {
+    const panel = $id('aiPanel');
+    const btn = $id('btnExplain');
+    const a = aiOf(sc);
+    const hasText = !!(a.inContext || a.why || a.rephrase || a.tip);
+    if (!editing.id) { panel.hidden = true; return; }
+    panel.hidden = false;
+    btn.disabled = editing.busy;
+    const box = $id('aiStatus');
+    if (editing.busy) {
+      box.className = 'ai-status busy';
+      box.textContent = 'AI 正在结合这句话讲解，请稍候…';
+    } else if (a.status === 'pending') {
+      box.className = 'ai-status busy';
+      box.textContent = '这句话的讲解生成中…';
+    } else if (a.status === 'done' && hasText) {
+      box.className = 'ai-status done';
+      box.textContent = '已结合这句话讲解，以下内容可修改。';
+    } else if (a.status === 'error') {
+      box.className = 'ai-status error';
+      box.textContent = '上次讲解失败：' + (a.error || '未知原因');
+    } else {
+      box.className = 'ai-status';
+      box.textContent = '点下方“AI 讲解这句”即可生成讲解。';
+    }
   }
 
   async function submitEditor() {
     if (editing.busy) return;
     const word = $id('fWord').value.trim();
     if (!word) { toast('请填写单词', { type: 'error' }); return; }
-    const payload = {
-      word,
-      sentence: $id('fSentence').value.trim(),
-      phonetic: $id('fPhonetic').value.trim(),
-      translation: $id('fTranslation').value.trim(),
-      definitions: lines($id('fDefinitions').value),
-      note: $id('fNote').value.trim(),
-    };
+    const sentence = $id('fSentence').value.trim();
     editing.busy = true;
     const btn = $id('btnSave');
     btn.disabled = true;
     try {
       if (editing.id) {
-        const ai = aiPayload();
-        const anyAi = !!(ai.inContext || ai.why || ai.rephrase || ai.tip);
-        const cur = words.find((x) => x.id === editing.id);
-        payload.ai = {
-          ...ai,
-          status: anyAi ? 'done' : (cur && cur.ai.status === 'done' ? 'none' : 'none'),
+        const w = curWord();
+        const sc = w.sentences[Math.min(editing.sceneIndex, w.sentences.length - 1)];
+        const patch = {
+          word,
+          phonetic: $id('fPhonetic').value.trim(),
+          translation: $id('fTranslation').value.trim(),
+          definitions: lines($id('fDefinitions').value),
+          note: $id('fNote').value.trim(),
         };
-        const d = await api('/api/words/' + encodeURIComponent(editing.id), { method: 'PATCH', body: JSON.stringify(payload) });
-        const w = normalize(d.word);
-        const i = words.findIndex((x) => x.id === w.id);
-        if (i >= 0) words[i] = w; else words.unshift(w);
+        const ai = {
+          inContext: $id('fInContext').value.trim(),
+          why: $id('fWhy').value.trim(),
+          rephrase: $id('fRephrase').value.trim(),
+          tip: $id('fTip').value.trim(),
+        };
+        if (sentence !== sc.text) {
+          await api(`/api/words/${w.id}/scenes/${sc.id}`, { method: 'PATCH', body: JSON.stringify({ text: sentence }) });
+          ai.status = 'error';
+          ai.error = '句子已修改，请重新讲解';
+        } else {
+          ai.status = 'done';
+          ai.error = '';
+        }
+        // AI 讲解是逐句保存的：手动改过的讲解内容直接写回该句
+        patch.scene = { id: sc.id, ai };
+        // 场景讲解先写回服务端（简化：句子未变且讲解有内容时）
+        if (sentence === sc.text && (ai.inContext || ai.why || ai.rephrase || ai.tip)) {
+          await api(`/api/words/${w.id}/scenes/${sc.id}/ai`, { method: 'PATCH', body: JSON.stringify({ ai }) });
+        }
+        await api(`/api/words/${w.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
         $id('editorDialog').close();
-        renderAll();
-        toast(`已保存 “${w.word}”`, { type: 'success' });
+        toast(`已保存 “${word}”`, { type: 'success' });
       } else {
         const d = await api('/api/words/batch', {
           method: 'POST',
-          body: JSON.stringify({ items: [{ word, sentence: payload.sentence }] }),
+          body: JSON.stringify({ items: [{ word, sentence }] }),
         });
-        const created = (d.words || []).map(normalize).filter(Boolean);
-        const ids = new Set(created.map((x) => x.id));
-        const ws = new Set(created.map((x) => x.word.toLowerCase()));
-        words = words.filter((x) => !ids.has(x.id) && !ws.has(x.word.toLowerCase()));
-        words = created.concat(words);
-        $id('editorDialog').close();
-        renderAll();
         const added = Number(d.added) || 0;
         const hit = Number(d.hit) || 0;
-        toast(added === 0 && hit > 0
-          ? `“${created[0].word}” 已在词库中（命中，未重复创建）`
-          : hit > 0
-            ? `新增 ${added} 个 · 命中 ${hit} 个（句子场景已并入原词条）`
-            : created.length === 1
-              ? `已加入 “${created[0].word}”，正在补释义讲解…`
-              : `已加入 ${created.length} 个词，正在补释义讲解…`, { type: 'success', ms: 4200 });
+        $id('editorDialog').close();
+        if (added === 0 && hit > 0) {
+          toast(`“${word}” 已在词库中（命中，未重复创建）`, { type: 'success' });
+        } else if (hit > 0) {
+          toast(`新增 ${added} 个 · 命中 ${hit} 个（句子已并入原词条）`, { type: 'success' });
+        } else {
+          toast(`已加入 “${word}”，正在补释义讲解…`, { type: 'success', ms: 4200 });
+        }
       }
+      await loadData();
     } catch (e) {
       toast(e.message || '保存失败', { type: 'error' });
     } finally {
@@ -376,55 +422,60 @@
     }
   }
 
-  async function runAiExplain(id) {
+  async function runAiExplain() {
+    const w = curWord();
+    if (!w || editing.busy) return;
+    const sc = w.sentences[Math.min(editing.sceneIndex, w.sentences.length - 1)];
     editing.busy = true;
-    editing.id = id;
-    renderAiPanel(words.find((x) => x.id === id));
+    renderAiStatus(w, sc);
     try {
-      const d = await api('/api/words/' + encodeURIComponent(id) + '/explain', { method: 'POST' });
-      const w = normalize(d.word);
-      const i = words.findIndex((x) => x.id === w.id);
-      if (i >= 0) words[i] = w;
-      $id('fInContext').value = w.ai.inContext;
-      $id('fWhy').value = w.ai.why;
-      $id('fRephrase').value = w.ai.rephrase;
-      $id('fTip').value = w.ai.tip;
+      const d = await api(`/api/words/${w.id}/scenes/${sc.id}/explain`, { method: 'POST' });
+      const nw = normalize(d.word);
+      const i = words.findIndex((x) => x.id === nw.id);
+      if (i >= 0) words[i] = nw;
+      fillScene(nw);
       renderAll();
-      toast(`已讲解 “${w.word}”`, { type: 'success', ms: 3600 });
+      toast(`已讲解“${w.word}”这一句`, { type: 'success' });
     } catch (e) {
       toast('讲解失败：' + (e.message || ''), { type: 'error', ms: 5000 });
     } finally {
       editing.busy = false;
-      renderAiPanel(words.find((x) => x.id === id));
+      renderAiStatus(curWord(), curWord() && curWord().sentences[Math.min(editing.sceneIndex, curWord().sentences.length - 1)]);
     }
   }
 
-  async function runLookup(id) {
-    editing.busy = true;
-    const w0 = words.find((x) => x.id === id);
-    if (w0) renderAiPanel(w0);
-    try {
-      const d = await api('/api/words/' + encodeURIComponent(id) + '/lookup', { method: 'POST' });
-      const w = normalize(d.word);
-      const i = words.findIndex((x) => x.id === w.id);
-      if (i >= 0) words[i] = w;
-      $id('fPhonetic').value = w.phonetic;
-      $id('fTranslation').value = w.translation;
-      $id('fDefinitions').value = (w.definitions || []).join('\n');
-      renderAll();
-      toast('词典信息已更新', { type: 'success' });
-    } catch (e) {
-      toast('查词典失败：' + (e.message || ''), { type: 'error' });
-    } finally {
-      editing.busy = false;
-      renderAiPanel(words.find((x) => x.id === id));
-    }
-  }
-
-  async function deleteEditing() {
-    const w = words.find((x) => x.id === editing.id);
+  async function deleteCurrentScene() {
+    const w = curWord();
     if (!w) return;
-    const ok = await askConfirm({ title: '删除词条', message: `确定删除 “${w.word}”（${fmtWhen(w.createdAt)}）吗？删除后无法恢复。`, confirmText: '删除' });
+    const sc = w.sentences[Math.min(editing.sceneIndex, w.sentences.length - 1)];
+    const ok = await askConfirm({
+      title: '删除这一句',
+      message: `确定删除 “${w.word}” 的这句场景吗？该句讲解会一起删除，单词本身保留。`,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    try {
+      const d = await api(`/api/words/${w.id}/scenes/${sc.id}`, { method: 'DELETE' });
+      const nw = normalize(d.word);
+      const i = words.findIndex((x) => x.id === nw.id);
+      if (i >= 0) words[i] = nw;
+      editing.sceneIndex = Math.max(0, editing.sceneIndex - 1);
+      fillScene(nw);
+      renderAll();
+      toast('已删除该句场景', { type: 'success' });
+    } catch (e) {
+      toast(e.message || '删除失败', { type: 'error' });
+    }
+  }
+
+  async function deleteWord() {
+    const w = curWord();
+    if (!w) return;
+    const ok = await askConfirm({
+      title: '删除单词',
+      message: `确定删除 “${w.word}” 及它的所有句子吗？删除后无法恢复。`,
+      confirmText: '删除',
+    });
     if (!ok) return;
     try {
       await api('/api/words/' + encodeURIComponent(w.id), { method: 'DELETE' });
@@ -437,11 +488,31 @@
     }
   }
 
+  async function runLookup() {
+    const w = curWord();
+    if (!w || editing.busy) return;
+    editing.busy = true;
+    try {
+      const d = await api(`/api/words/${w.id}/lookup`, { method: 'POST' });
+      const nw = normalize(d.word);
+      const i = words.findIndex((x) => x.id === nw.id);
+      if (i >= 0) words[i] = nw;
+      $id('fPhonetic').value = nw.phonetic;
+      $id('fTranslation').value = nw.translation;
+      $id('fDefinitions').value = (nw.definitions || []).join('\n');
+      renderAll();
+      toast('词典信息已更新', { type: 'success' });
+    } catch (e) {
+      toast(e.message || '查词典失败', { type: 'error' });
+    } finally {
+      editing.busy = false;
+    }
+  }
+
   /* ---------- 备份 / 导入 ---------- */
   function exportData() {
     const a = document.createElement('a');
     a.href = '/api/export';
-    a.download = '';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -471,8 +542,8 @@
 
   async function runImport(mode) {
     if (!fileWords) return;
-    const btn1 = $id('btnImportMerge'), btn2 = $id('btnImportReplace');
-    btn1.disabled = btn2.disabled = true;
+    const b1 = $id('btnImportMerge'), b2 = $id('btnImportReplace');
+    b1.disabled = b2.disabled = true;
     try {
       const d = await api('/api/import', { method: 'POST', body: JSON.stringify({ mode, words: fileWords }) });
       fileWords = null;
@@ -483,7 +554,7 @@
     } catch (e) {
       toast(e.message || '导入失败', { type: 'error' });
     } finally {
-      btn1.disabled = btn2.disabled = false;
+      b1.disabled = b2.disabled = false;
     }
   }
 
@@ -516,7 +587,6 @@
       searchTimer = setTimeout(() => { ui.query = e.target.value; renderList(); }, 140);
     });
     $id('sortSelect').addEventListener('change', (e) => { ui.sort = e.target.value; renderList(); });
-
     $id('tabs').addEventListener('click', (e) => {
       const btn = e.target.closest('.tab');
       if (!btn) return;
@@ -535,54 +605,42 @@
         const w = words.find((x) => x.id === id);
         if (!w) return;
         if (act.dataset.act === 'speak') speakWord(w);
-        else if (act.dataset.act === 'retry') runAiExplain(id);
+        else if (act.dataset.act === 'retry') {
+          editing.id = id;
+          editing.sceneIndex = 0;
+          runAiExplain();
+        }
         return;
       }
       openEditor(id);
     });
     $id('wordList').addEventListener('keydown', (e) => {
       const row = e.target.closest('.word-row');
-      if (row && (e.key === 'Enter')) { e.preventDefault(); openEditor(row.dataset.id); }
+      if (row && e.key === 'Enter') { e.preventDefault(); openEditor(row.dataset.id); }
     });
 
     $id('wordForm').addEventListener('submit', (e) => { e.preventDefault(); submitEditor(); });
-    $id('fSentence').addEventListener('input', () => {
-      if (!editing.id) renderAiPanel(null);
+    $id('scenePrev').addEventListener('click', () => {
+      const w = curWord();
+      if (!w || editing.sceneIndex <= 0) return;
+      editing.sceneIndex--;
+      fillScene(w);
     });
+    $id('sceneNext').addEventListener('click', () => {
+      const w = curWord();
+      if (!w || editing.sceneIndex >= w.sentences.length - 1) return;
+      editing.sceneIndex++;
+      fillScene(w);
+    });
+    $id('btnExplain').addEventListener('click', () => { if (editing.id) runAiExplain(); else toast('请先保存这个词，再对句子讲解', {}); });
+    $id('btnDeleteScene').addEventListener('click', deleteCurrentScene);
     $id('btnSpeak').addEventListener('click', () => {
       const word = $id('fWord').value.trim();
-      const w = words.find((x) => x.id === editing.id);
+      const w = curWord();
       if (word) speakWord({ word, audio: w ? w.audio : '' });
     });
-    $id('btnExplain').addEventListener('click', async () => {
-      if (editing.busy) return;
-      if (!editing.id) {
-        toast('请先保存这个词，再用 AI 讲解', {});
-        return;
-      }
-      const sentence = $id('fSentence').value.trim();
-      const cur = words.find((x) => x.id === editing.id) || {};
-      if (sentence && sentence !== cur.sentence) {
-        const d = await api('/api/words/' + encodeURIComponent(editing.id), {
-          method: 'PATCH',
-          body: JSON.stringify({ sentence }),
-        });
-        const w = normalize(d.word);
-        const i = words.findIndex((x) => x.id === w.id);
-        if (i >= 0) words[i] = w;
-      }
-      await runAiExplain(editing.id);
-    });
-    $id('btnLookup').addEventListener('click', async () => {
-      if (editing.busy) return;
-      const w = words.find((x) => x.id === editing.id);
-      if (w) {
-        await runLookup(w.id);
-      } else {
-        toast('请先保存这个词，再用“查词典”补全', {});
-      }
-    });
-    $id('btnDelete').addEventListener('click', deleteEditing);
+    $id('btnLookup').addEventListener('click', runLookup);
+    $id('btnDelete').addEventListener('click', deleteWord);
 
     $$('[data-close]').forEach((btn) => {
       btn.addEventListener('click', () => $id(btn.dataset.close).close());
@@ -593,42 +651,24 @@
 
     document.addEventListener('keydown', (e) => {
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-      const anyOpen = !!$('dialog[open]');
-      if (anyOpen) return;
+      if ($('dialog[open]')) return;
       if (typing) return;
       if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openEditor(null); }
       else if (e.key === '/') { e.preventDefault(); $id('searchInput').focus(); }
     });
   }
 
-  function resolveConfirm(v) {
-    if (confirmResolver) { const r = confirmResolver; confirmResolver = null; r.resolve(v); }
-  }
-
   /* ---------- 启动 ---------- */
   async function init() {
     applyTheme();
     bind();
-    $id('storageInfo').textContent = '数据保存在本机 data 文件夹 · 词典释义与 AI 讲解在后台自动补全';
     await loadData();
-    try {
-      const cfg = await api('/api/config');
-      if (!cfg.aiConfigured) {
-        refreshConfig();
-        if (words.length > 0) {
-          toast('尚未检测到 DeepSeek key：在项目根目录把 .env.local.example 复制为 .env.local 并填入 key，保存后会自动生效（无需重启）。当前记录与词典补全不受影响。', { ms: 8000 });
-        }
-      }
-    } catch (e) { /* 忽略 */ }
+    refreshConfig();
     setInterval(() => {
       if (document.hidden) return;
-      const need = words.some((w) => aiStatus(w) === 'pending');
-      if (need || words.length === 0) loadData(true);
-      else loadData(true);
+      loadData(true);
       refreshConfig();
     }, 12000);
-    const params = new URLSearchParams(location.search);
-    if (params.get('new') === '1') openEditor(null);
   }
 
   document.addEventListener('DOMContentLoaded', init);

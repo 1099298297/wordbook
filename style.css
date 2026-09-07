@@ -239,6 +239,16 @@ svg { display: block; }
 .list-wrap { min-height: 160px; }
 .word-list { display: flex; flex-direction: column; gap: 8px; }
 
+.day-heading {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: .3px;
+  user-select: none;
+}
+.day-heading:first-child { margin-top: 0; }
+
 .word-row {
   display: flex;
   gap: 14px;
@@ -291,6 +301,21 @@ svg { display: block; }
 .row-sentence::before { content: "“"; }
 .row-sentence::after { content: "”"; }
 .row-sentence:empty::before, .row-sentence:empty::after { content: none; }
+.row-sentence.empty { font-style: normal; color: var(--faint); }
+
+.scene-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 6px 0 2px;
+}
+.scene-meta { display: flex; flex-direction: column; align-items: center; line-height: 1.35; }
+#sceneIndex { font-weight: 700; font-size: 14px; }
+#sceneDate { color: var(--faint); font-size: 12px; }
+.nav-btn { width: 32px; height: 32px; }
+.nav-btn:disabled { opacity: .35; cursor: default; }
+.scene-actions { display: flex; justify-content: flex-start; margin-top: -4px; }
 
 .row-ai {
   margin-top: 5px;

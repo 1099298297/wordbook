@@ -239,20 +239,17 @@ public class Pipeline
                 var newWords = outcome.Words
                     .Where(w => outcome.NewIds.Contains(w["id"]!.GetValue<string>()))
                     .ToList();
-                var aiWords = outcome.Words
-                    .Where(w => AiStatus(w) != "done")
-                    .ToList();
+                var sceneRefs = outcome.ScenesToExplain;
                 if (!needAi)
                 {
-                    foreach (var w in aiWords.Where(w => AiStatus(w) == "pending"))
+                    foreach (var s in sceneRefs)
                     {
-                        var id = w["id"]!.GetValue<string>();
-                        await _store.MutateWordAsync(id, x =>
+                        await _store.MutateSceneAsync(s.WordId, s.SceneId, scene =>
                         {
-                            if (x["ai"] is not JsonObject a)
+                            if (scene["ai"] is not JsonObject a)
                             {
                                 a = new JsonObject();
-                                x["ai"] = a;
+                                scene["ai"] = a;
                             }
                             a["status"] = "none";
                             a["error"] = "未配置 DeepSeek key";
@@ -264,29 +261,17 @@ public class Pipeline
                     var id = w["id"]!.GetValue<string>();
                     var word = w["word"]!.GetValue<string>();
                     var dict = await _dict.LookupAsync(word);
-                    await _store.MutateWordAsync(id, x =>
+                    await _store.PatchWordAsync(id, new JsonObject
                     {
-                        x["phonetic"] = dict["phonetic"]?.GetValue<string>() ?? "";
-                        if (string.IsNullOrEmpty(x["translation"]?.GetValue<string>()))
-                            x["translation"] = dict["translation"]?.GetValue<string>() ?? "";
-                        if (dict["definitions"] is JsonArray defs && defs.Count > 0)
-                            x["definitions"] = (JsonArray)defs.DeepClone();
-                        if (string.IsNullOrEmpty(x["audio"]?.GetValue<string>()))
-                            x["audio"] = dict["audio"]?.GetValue<string>() ?? "";
+                        ["phonetic"] = dict["phonetic"]?.GetValue<string>() ?? "",
+                        ["translation"] = dict["translation"]?.GetValue<string>() ?? "",
+                        ["definitions"] = dict["definitions"] ?? new JsonArray(),
+                        ["audio"] = dict["audio"]?.GetValue<string>() ?? "",
                     });
                 }).ToArray();
-                var aiTasks = new List<Task>();
-                if (needAi && aiWords.Count > 0)
-                {
-                    var groups = aiWords.GroupBy(w => w["sentence"]?.GetValue<string>() ?? "");
-                    foreach (var g in groups)
-                    {
-                        var items = g
-                            .Select(w => (w["id"]!.GetValue<string>(), w["word"]!.GetValue<string>()))
-                            .ToList();
-                        aiTasks.Add(ExplainCoreAsync(g.Key ?? "", items));
-                    }
-                }
+                var aiTasks = needAi
+                    ? sceneRefs.Select(s => ExplainSceneCoreAsync(s)).ToArray()
+                    : Array.Empty<Task>();
                 var all = lookups.Concat(aiTasks).ToArray();
                 await Task.WhenAll(all);
             }
@@ -294,86 +279,73 @@ public class Pipeline
         });
     }
 
-    private static string AiStatus(JsonObject w)
+    public async Task<JsonObject> ExplainSceneAsync(string wordId, string sceneId)
     {
-        return w["ai"]?["status"]?.GetValue<string>() ?? "none";
-    }
-
-    public async Task<JsonObject> ExplainSingleAsync(string id)
-    {
-        var snap = await _store.GetSnapshotAsync();
-        var arr = (JsonArray)snap["words"]!;
-        var w = arr.FirstOrDefault(x => x is JsonObject o && string.Equals(o["id"]?.GetValue<string>(), id, StringComparison.Ordinal));
-        if (w is not JsonObject word) return null;
-        var sentence = word["sentence"]?.GetValue<string>() ?? "";
-        var wd = word["word"]!.GetValue<string>();
-        await ExplainCoreAsync(sentence, new List<(string, string)> { (id, wd) });
-        return await GetWordAsync(id);
+        var word = await _store.GetWordAsync(wordId);
+        if (word == null) return null;
+        var scene = (word["sentences"] as JsonArray)?.FirstOrDefault(s => s is JsonObject so &&
+            string.Equals(so["id"]?.GetValue<string>(), sceneId, StringComparison.Ordinal)) as JsonObject;
+        if (scene == null) return null;
+        var text = scene["text"]?.GetValue<string>() ?? "";
+        await ExplainSceneCoreAsync(new SceneRef
+        {
+            WordId = wordId,
+            SceneId = sceneId,
+            Word = word["word"]!.GetValue<string>(),
+            Text = text,
+        });
+        return await _store.GetWordAsync(wordId);
     }
 
     public async Task<JsonObject> LookupSingleAsync(string id)
     {
-        var snap = await _store.GetSnapshotAsync();
-        var arr = (JsonArray)snap["words"]!;
-        var w = arr.FirstOrDefault(x => x is JsonObject o && string.Equals(o["id"]?.GetValue<string>(), id, StringComparison.Ordinal));
-        if (w is not JsonObject word) return null;
+        var word = await _store.GetWordAsync(id);
+        if (word == null) return null;
         var wd = word["word"]!.GetValue<string>();
         var dict = await _dict.LookupAsync(wd);
-        await _store.MutateWordAsync(id, x =>
+        await _store.PatchWordAsync(id, new JsonObject
         {
-            x["phonetic"] = dict["phonetic"]?.GetValue<string>() ?? "";
-            if (!string.IsNullOrEmpty(dict["translation"]?.GetValue<string>()))
-                x["translation"] = dict["translation"]!.GetValue<string>();
-            x["definitions"] = (JsonArray)(dict["definitions"] ?? new JsonArray()).DeepClone();
-            if (!string.IsNullOrEmpty(dict["audio"]?.GetValue<string>()))
-                x["audio"] = dict["audio"]!.GetValue<string>();
+            ["phonetic"] = dict["phonetic"]?.GetValue<string>() ?? "",
+            ["translation"] = dict["translation"]?.GetValue<string>() ?? "",
+            ["definitions"] = dict["definitions"] ?? new JsonArray(),
+            ["audio"] = dict["audio"]?.GetValue<string>() ?? "",
         });
-        return await GetWordAsync(id);
+        return await _store.GetWordAsync(id);
     }
 
-    private async Task ExplainCoreAsync(string sentence, List<(string Id, string Word)> items)
+    private async Task ExplainSceneCoreAsync(SceneRef s)
     {
-        var (ok, map, error) = await _ai.ExplainAsync(sentence, items);
-        foreach (var (id, word) in items)
+        var (ok, map, error) = await _ai.ExplainAsync(s.Text,
+            new List<(string Id, string Word)> { (s.WordId, s.Word) });
+        var key = s.Word.Trim().ToLowerInvariant();
+        if (ok && map.TryGetValue(key, out var ai))
         {
-            var key = word.Trim().ToLowerInvariant();
-            if (ok && map.TryGetValue(key, out var ai))
+            await _store.MutateSceneAsync(s.WordId, s.SceneId, scene =>
             {
-                await _store.MutateWordAsync(id, x =>
+                scene["ai"] = new JsonObject
                 {
-                    x["ai"] = new JsonObject
-                    {
-                        ["status"] = "done",
-                        ["inContext"] = ai["inContext"]?.GetValue<string>() ?? "",
-                        ["why"] = ai["why"]?.GetValue<string>() ?? "",
-                        ["rephrase"] = ai["rephrase"]?.GetValue<string>() ?? "",
-                        ["tip"] = ai["tip"]?.GetValue<string>() ?? "",
-                        ["error"] = "",
-                    };
-                });
-            }
-            else
-            {
-                await _store.MutateWordAsync(id, x =>
-                {
-                    if (x["ai"] is not JsonObject ai0)
-                    {
-                        ai0 = new JsonObject();
-                        x["ai"] = ai0;
-                    }
-                    ai0["status"] = "error";
-                    ai0["error"] = error ?? "AI 讲解失败";
-                });
-            }
+                    ["status"] = "done",
+                    ["inContext"] = ai["inContext"]?.GetValue<string>() ?? "",
+                    ["why"] = ai["why"]?.GetValue<string>() ?? "",
+                    ["rephrase"] = ai["rephrase"]?.GetValue<string>() ?? "",
+                    ["tip"] = ai["tip"]?.GetValue<string>() ?? "",
+                    ["error"] = "",
+                };
+            });
         }
-    }
-
-    private async Task<JsonObject> GetWordAsync(string id)
-    {
-        var snap = await _store.GetSnapshotAsync();
-        var arr = (JsonArray)snap["words"]!;
-        var w = arr.FirstOrDefault(x => x is JsonObject o && string.Equals(o["id"]?.GetValue<string>(), id, StringComparison.Ordinal));
-        return w as JsonObject;
+        else
+        {
+            await _store.MutateSceneAsync(s.WordId, s.SceneId, scene =>
+            {
+                if (scene["ai"] is not JsonObject ai0)
+                {
+                    ai0 = new JsonObject();
+                    scene["ai"] = ai0;
+                }
+                ai0["status"] = "error";
+                ai0["error"] = error ?? "AI 讲解失败";
+            });
+        }
     }
 }
 
@@ -448,10 +420,46 @@ public static class WebHost
             return ok ? Results.Json(new { ok = true }) : Results.Json(new { ok = false, error = "单词不存在" }, statusCode: 404);
         });
 
-        app.MapPost("/api/words/{id}/explain", async (string id) =>
+        app.MapPatch("/api/words/{id}/scenes/{sid}", async (HttpContext cx, string id, string sid) =>
         {
-            var w = await pipe.ExplainSingleAsync(id);
-            return w == null ? Results.Json(new { ok = false, error = "单词不存在" }, statusCode: 404)
+            var body = await ReadBodyAsync(cx);
+            var text = body?["text"]?.GetValue<string>() ?? "";
+            var (ok, w, error) = await store.PatchSceneAsync(id, sid, text);
+            return ok ? Results.Json(new { ok = true, word = w })
+                : Results.Json(new { ok = false, error }, statusCode: 400);
+        });
+
+        app.MapDelete("/api/words/{id}/scenes/{sid}", async (string id, string sid) =>
+        {
+            var (ok, w, error) = await store.DeleteSceneAsync(id, sid);
+            return ok ? Results.Json(new { ok = true, word = w })
+                : Results.Json(new { ok = false, error }, statusCode: 400);
+        });
+
+        app.MapPost("/api/words/{id}/scenes/{sid}/explain", async (string id, string sid) =>
+        {
+            var w = await pipe.ExplainSceneAsync(id, sid);
+            return w == null ? Results.Json(new { ok = false, error = "单词或句子不存在" }, statusCode: 404)
+                : Results.Json(new { ok = true, word = w });
+        });
+
+        app.MapPatch("/api/words/{id}/scenes/{sid}/ai", async (HttpContext cx, string id, string sid) =>
+        {
+            var body = await ReadBodyAsync(cx);
+            var ai = body?["ai"] as JsonObject;
+            if (ai == null) return JsonResult(new { ok = false, error = "参数无效" }, 400);
+            await store.MutateSceneAsync(id, sid, scene =>
+            {
+                if (scene["ai"] is not JsonObject target)
+                {
+                    target = new JsonObject();
+                    scene["ai"] = target;
+                }
+                foreach (var k in new[] { "status", "inContext", "why", "rephrase", "tip", "error" })
+                    if (ai[k] != null) target[k] = ai[k]?.DeepClone();
+            });
+            var w = await store.GetWordAsync(id);
+            return w == null ? JsonResult(new { ok = false, error = "单词不存在" }, 404)
                 : Results.Json(new { ok = true, word = w });
         });
 
