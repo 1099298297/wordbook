@@ -580,7 +580,7 @@ public class CaptureWindow : Window
                 Margin = new Thickness(0, 0, 0, 6),
             };
             var tb = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 13.5, MaxWidth = 460 };
-            if (!map.TryGetValue(id, out var w))
+            if (map == null || !map.TryGetValue(id, out var w))
             {
                 tb.Inlines.Add(new Run(word) { FontWeight = FontWeights.Bold, FontSize = 15 });
                 tb.Inlines.Add(new Run("  — 已保存，等待后台处理…") { Foreground = MutedBrush });
