@@ -298,7 +298,7 @@
       box.className = 'ai-status';
       box.textContent = sentence
         ? '填好上方的原句后，可以让 AI 结合语境讲解这个词。'
-        : '还没有原句：填上原句（记录时在哪句话遇到它）后，AI 才能结合语境讲解。';
+        : '没有原句也能讲：AI 会按一般词义和用法讲解；补上原句则可结合语境讲解。';
     }
   }
 
@@ -546,11 +546,8 @@
         return;
       }
       const sentence = $id('fSentence').value.trim();
-      if (!sentence) {
-        toast('请先填写“记录时的原句”，AI 才能结合语境讲解', { type: 'error', ms: 4200 });
-        return;
-      }
-      if (sentence !== (words.find((x) => x.id === editing.id) || {}).sentence) {
+      const cur = words.find((x) => x.id === editing.id) || {};
+      if (sentence && sentence !== cur.sentence) {
         const d = await api('/api/words/' + encodeURIComponent(editing.id), {
           method: 'PATCH',
           body: JSON.stringify({ sentence }),

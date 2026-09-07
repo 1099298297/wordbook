@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
@@ -8,6 +9,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using System.Windows.Documents;
 using TextBox = System.Windows.Controls.TextBox;
 using Button = System.Windows.Controls.Button;
 using Brush = System.Windows.Media.Brush;
@@ -112,7 +114,13 @@ public class CaptureWindow : Window
     private readonly HashSet<string> _selectedWords = new(StringComparer.OrdinalIgnoreCase);
     private readonly TextBlock _status;
     private readonly Button _saveBtn;
+    private readonly StackPanel _root;
+    private readonly StackPanel _resultHost;
+    private readonly StackPanel _btnRow;
+    private readonly List<(string Id, string Word)> _saved = new();
     private readonly DispatcherTimer _parseTimer;
+    private DispatcherTimer _pollTimer;
+    private int _pollTicks;
     private bool _isSentenceMode;
 
     public CaptureWindow(Config cfg, IntPtr prevHwnd)
@@ -144,7 +152,8 @@ public class CaptureWindow : Window
                 BlurRadius = 26, ShadowDepth = 5, Opacity = 0.25, Color = Color.FromRgb(20, 25, 50),
             },
         };
-        var root = new StackPanel();
+        _root = new StackPanel();
+        var root = _root;
         border.Child = root;
         Content = border;
 
@@ -217,6 +226,7 @@ public class CaptureWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 12, 0, 0),
         };
+        _btnRow = btnRow;
         var cancelBtn = MakeButton("取消 (Esc)", false);
         cancelBtn.Click += (_, _) => Close();
         _saveBtn = MakeButton("保存", true);
@@ -224,6 +234,13 @@ public class CaptureWindow : Window
         btnRow.Children.Add(cancelBtn);
         btnRow.Children.Add(_saveBtn);
         root.Children.Add(btnRow);
+
+        _resultHost = new StackPanel
+        {
+            Visibility = Visibility.Collapsed,
+            Margin = new Thickness(0, 10, 0, 0),
+        };
+        root.Children.Add(_resultHost);
 
         _input.Text = CleanClipboard();
         _input.TextChanged += (_, _) => ScheduleParse();
@@ -436,10 +453,17 @@ public class CaptureWindow : Window
             var res = await http.PostAsync(_cfg.HomeUrl + "/api/words/batch", content);
             if (res.IsSuccessStatusCode)
             {
-                ShowStatus($"已保存 {items.Count} 个词，正在逐个结合原句讲解…", false);
-                var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(850) };
-                timer.Tick += (_, _) => { timer.Stop(); Close(); };
-                timer.Start();
+                _saved.Clear();
+                var body = JsonNode.Parse(await res.Content.ReadAsStringAsync());
+                if (body?["words"] is JsonArray created)
+                {
+                    foreach (var it in created)
+                    {
+                        if (it is JsonObject jo)
+                            _saved.Add((jo["id"]?.GetValue<string>() ?? "", jo["word"]?.GetValue<string>() ?? ""));
+                    }
+                }
+                EnterResultMode();
             }
             else
             {
@@ -452,6 +476,167 @@ public class CaptureWindow : Window
             _saveBtn.IsEnabled = true;
             ShowStatus("保存失败：" + ex.Message);
         }
+    }
+
+    private void EnterResultMode()
+    {
+        _input.Visibility = Visibility.Collapsed;
+        _hint.Visibility = Visibility.Collapsed;
+        _sentenceScroll.Visibility = Visibility.Collapsed;
+        _status.Visibility = Visibility.Collapsed;
+        _btnRow.Visibility = Visibility.Collapsed;
+        _resultHost.Visibility = Visibility.Visible;
+        _pollTicks = 0;
+        RenderResult(null);
+
+        _pollTimer?.Stop();
+        _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1300) };
+        _pollTimer.Tick += async (_, _) => await PollResultAsync();
+        _pollTimer.Start();
+    }
+
+    private async Task PollResultAsync()
+    {
+        _pollTicks++;
+        Dictionary<string, JsonObject> map = new();
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            var res = await http.GetAsync(_cfg.HomeUrl + "/api/data");
+            if (res.IsSuccessStatusCode)
+            {
+                var node = JsonNode.Parse(await res.Content.ReadAsStringAsync());
+                if (node?["words"] is JsonArray arr)
+                {
+                    foreach (var item in arr)
+                    {
+                        if (item is JsonObject o && o["id"]?.GetValue<string>() is string id)
+                            map[id] = o;
+                    }
+                }
+            }
+        }
+        catch { /* 网络抖动就下一轮再试 */ }
+
+        var allDone = _saved.Count > 0;
+        foreach (var (id, _) in _saved)
+        {
+            if (!map.TryGetValue(id, out var w) || !RowDone(w))
+            {
+                allDone = false;
+                break;
+            }
+        }
+        RenderResult(map);
+        if (allDone || _pollTicks >= 45)
+        {
+            _pollTimer.Stop();
+        }
+    }
+
+    private bool RowDone(JsonObject w)
+    {
+        if (AnyMeaning(w)) return true;
+        var status = w["ai"]?["status"]?.GetValue<string>() ?? "";
+        if (status == "pending") return false;
+        return _pollTicks >= 14; // 给词典接口留出超时时间
+    }
+
+    private static bool AnyMeaning(JsonObject w)
+    {
+        if (!string.IsNullOrWhiteSpace(w["translation"]?.GetValue<string>())) return true;
+        if (w["definitions"] is JsonArray defs && defs.Count > 0) return true;
+        var ai = w["ai"];
+        if (ai == null) return false;
+        return !string.IsNullOrWhiteSpace(ai["inContext"]?.GetValue<string>())
+            || !string.IsNullOrWhiteSpace(ai["why"]?.GetValue<string>());
+    }
+
+    private void RenderResult(Dictionary<string, JsonObject> map)
+    {
+        _resultHost.Children.Clear();
+        var complete = map != null && _saved.All(s => map.TryGetValue(s.Id, out var w) && RowDone(w));
+        var timeout = _pollTicks >= 45;
+        _resultHost.Children.Add(new TextBlock
+        {
+            Text = complete
+                ? $"已记录 {_saved.Count} 个词："
+                : timeout
+                    ? "讲解仍在后台，可打开网页查看最新结果（Esc 关闭）"
+                    : "正在补释义 / AI 讲解中…（可先看已出的结果，Esc 关闭）",
+            FontSize = 13.5,
+            FontWeight = complete ? FontWeights.Bold : FontWeights.SemiBold,
+            Foreground = complete ? new SolidColorBrush(Color.FromRgb(20, 150, 110)) : MutedBrush,
+            Margin = new Thickness(0, 0, 0, 8),
+        });
+
+        foreach (var (id, word) in _saved)
+        {
+            var box = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(243, 245, 252)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 0, 0, 6),
+            };
+            var tb = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 13.5, MaxWidth = 460 };
+            if (!map.TryGetValue(id, out var w))
+            {
+                tb.Inlines.Add(new Run(word) { FontWeight = FontWeights.Bold, FontSize = 15 });
+                tb.Inlines.Add(new Run("  — 已保存，等待后台处理…") { Foreground = MutedBrush });
+                box.Child = tb;
+                _resultHost.Children.Add(box);
+                continue;
+            }
+
+            tb.Inlines.Add(new Run(word) { FontWeight = FontWeights.Bold, FontSize = 15 });
+            var ph = w["phonetic"]?.GetValue<string>() ?? "";
+            if (!string.IsNullOrWhiteSpace(ph))
+                tb.Inlines.Add(new Run("  " + ph) { Foreground = MutedBrush, FontSize = 12.5 });
+            tb.Inlines.Add(new LineBreak());
+
+            var lines = new List<string>();
+            var trans = w["translation"]?.GetValue<string>() ?? "";
+            if (!string.IsNullOrWhiteSpace(trans)) lines.Add("中文释义：" + trans);
+            if (w["definitions"] is JsonArray defs && defs.Count > 0 && string.IsNullOrWhiteSpace(trans))
+                lines.Add("英文释义：" + defs[0]?.GetValue<string>());
+            var ai = w["ai"];
+            var aiStatus = ai?["status"]?.GetValue<string>() ?? "";
+            var inContext = ai?["inContext"]?.GetValue<string>() ?? "";
+            if (aiStatus == "pending") lines.Add("AI 讲解中…");
+            else if (aiStatus == "done" && !string.IsNullOrWhiteSpace(inContext)) lines.Add("讲解：" + inContext);
+            else if (aiStatus == "error") lines.Add("AI 讲解失败：" + (ai?["error"]?.GetValue<string>() ?? ""));
+            if (lines.Count == 0)
+            {
+                lines.Add(aiStatus == "none"
+                    ? "暂无释义（可点下方按钮打开网页补充或重新讲解）"
+                    : "释义整理中…");
+            }
+            foreach (var line in lines)
+            {
+                tb.Inlines.Add(new Run(line) { Foreground = new SolidColorBrush(Color.FromRgb(70, 76, 100)) });
+                tb.Inlines.Add(new LineBreak());
+            }
+            box.Child = tb;
+            _resultHost.Children.Add(box);
+        }
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        var openBtn = MakeButton("打开网页看完整讲解", false);
+        openBtn.Click += (_, _) =>
+        {
+            try { Process.Start(new ProcessStartInfo(_cfg.HomeUrl) { UseShellExecute = true }); } catch { /* 忽略 */ }
+        };
+        var closeBtn = MakeButton("关闭 (Esc)", true);
+        closeBtn.Click += (_, _) => Close();
+        actions.Children.Add(openBtn);
+        actions.Children.Add(closeBtn);
+        _resultHost.Children.Add(actions);
     }
 
     private void PositionNearCursor()

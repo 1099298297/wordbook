@@ -134,10 +134,10 @@ public class AiClient
                 new JsonObject
                 {
                     ["role"] = "system",
-                    ["content"] = "你是一位耐心的英语老师。用户会给你一句英文原句和句中要学习的单词列表。" +
-                        "请针对每个单词解释它在“这一句里”的意思，帮助用户真正读懂并记住这个词。" +
+                    ["content"] = "你是一位耐心的英语老师。用户会给你一句英文原句（可能为空）和要学习的单词列表。" +
+                        "如果原句不为空，请解释每个单词在“这一句里”的意思；如果原句为空，就按这个词的一般词义和常见用法讲解。" +
                         "只输出一个 JSON 对象，不要输出 markdown 代码块或任何解释。" +
-                        "JSON 结构：{\"words\":[{\"word\":\"原词小写\",\"inContext\":\"中文：在这个句子里它是什么意思\",\"why\":\"中文：为什么在这个句子里是这个意思（词性/搭配/语境）\",\"rephrase\":\"把这一处用更简单的词改写后的句子或短语\",\"tip\":\"中文记忆技巧：词根/联想/相近词\"}]}。" +
+                        "JSON 结构：{\"words\":[{\"word\":\"原词小写\",\"inContext\":\"中文：这个词（在这个句子里）是什么意思\",\"why\":\"中文：为什么是这个意思（词性/搭配/语境；无原句时讲词义来源）\",\"rephrase\":\"换一种更简单的说法；无原句时给一个简单的英文例句或同义表达\",\"tip\":\"中文记忆技巧：词根/联想/相近词\"}]}。" +
                         "要求：每个字段都是自然流畅的中文（rephrase 可含英文），每个词条总共不超过 5 行，不啰嗦、不空话。",
                 },
                 new JsonObject
@@ -171,7 +171,10 @@ public class AiClient
     private static string BuildUserPrompt(string sentence, List<(string Id, string Word)> items)
     {
         var words = items.Select(x => x.Word).ToList();
-        return "原句：" + sentence + "\n\n要学习的单词：" + string.Join("、", words) +
+        var head = string.IsNullOrWhiteSpace(sentence)
+            ? "用户没有提供原句，请直接讲解这些单词的一般含义和用法。"
+            : "原句：" + sentence;
+        return head + "\n\n要学习的单词：" + string.Join("、", words) +
             "\n\n请按上面要求的 JSON 结构返回，word 字段与给出的小写单词一一对应。";
     }
 
@@ -234,7 +237,7 @@ public class Pipeline
             {
                 var sentence = created.Select(x => x["sentence"]?.GetValue<string>() ?? "")
                     .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)) ?? "";
-                var needAi = _ai.Enabled && sentence.Length > 0;
+                var needAi = _ai.Enabled;
                 if (!needAi)
                 {
                     foreach (var w in created)
@@ -248,7 +251,7 @@ public class Pipeline
                                 x["ai"] = a;
                             }
                             a["status"] = "none";
-                            a["error"] = sentence.Length == 0 ? "没有原句" : "未配置 DeepSeek key";
+                            a["error"] = "未配置 DeepSeek key";
                         });
                     }
                 }
@@ -268,15 +271,13 @@ public class Pipeline
                             x["audio"] = dict["audio"]?.GetValue<string>() ?? "";
                     });
                 }).ToArray();
-                await Task.WhenAll(lookups);
-
-                if (needAi)
-                {
-                    var items = created
+                var aiTask = needAi
+                    ? ExplainCoreAsync(sentence, created
                         .Select(x => (x["id"]!.GetValue<string>(), x["word"]!.GetValue<string>()))
-                        .ToList();
-                    await ExplainCoreAsync(sentence, items);
-                }
+                        .ToList())
+                    : Task.CompletedTask;
+                var all = lookups.Concat(new[] { aiTask }).ToArray();
+                await Task.WhenAll(all);
             }
             catch { /* 后台失败由页面状态展示 */ }
         });
