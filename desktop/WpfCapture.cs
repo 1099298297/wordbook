@@ -121,6 +121,8 @@ public class CaptureWindow : Window
     private readonly DispatcherTimer _parseTimer;
     private DispatcherTimer _pollTimer;
     private int _pollTicks;
+    private int _addedCount;
+    private int _hitCount;
     private bool _isSentenceMode;
 
     public CaptureWindow(Config cfg, IntPtr prevHwnd)
@@ -455,6 +457,8 @@ public class CaptureWindow : Window
             {
                 _saved.Clear();
                 var body = JsonNode.Parse(await res.Content.ReadAsStringAsync());
+                _addedCount = body?["added"]?.GetValue<int>() ?? 0;
+                _hitCount = body?["hit"]?.GetValue<int>() ?? 0;
                 if (body?["words"] is JsonArray created)
                 {
                     foreach (var it in created)
@@ -557,13 +561,19 @@ public class CaptureWindow : Window
         _resultHost.Children.Clear();
         var complete = map != null && _saved.All(s => map.TryGetValue(s.Id, out var w) && RowDone(w));
         var timeout = _pollTicks >= 45;
+        var headline = complete
+            ? _hitCount > 0 && _addedCount == 0
+                ? $"词库已命中 {_hitCount} 个词（不再重复翻译）："
+                : _hitCount > 0
+                    ? $"新增 {_addedCount} 个 · 命中 {_hitCount} 个（句子场景已并入原词条）："
+                    : $"已记录 {_addedCount} 个词："
+            : null;
         _resultHost.Children.Add(new TextBlock
         {
-            Text = complete
-                ? $"已记录 {_saved.Count} 个词："
-                : timeout
+            Text = headline
+                ?? (timeout
                     ? "讲解仍在后台，可打开网页查看最新结果（Esc 关闭）"
-                    : "正在补释义 / AI 讲解中…（可先看已出的结果，Esc 关闭）",
+                    : "正在补释义 / AI 讲解中…（可先看已出的结果，Esc 关闭）"),
             FontSize = 13.5,
             FontWeight = complete ? FontWeights.Bold : FontWeights.SemiBold,
             Foreground = complete ? new SolidColorBrush(Color.FromRgb(20, 150, 110)) : MutedBrush,

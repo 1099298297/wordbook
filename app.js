@@ -41,6 +41,8 @@
     w.definitions = Array.isArray(w.definitions) ? w.definitions.filter(Boolean) : [];
     w.audio = w.audio || '';
     w.sentence = w.sentence || '';
+    w.sentences = Array.isArray(w.sentences) ? w.sentences.map(String).filter(Boolean) : (w.sentence ? [w.sentence] : []);
+    if (!w.sentence && w.sentences.length) w.sentence = w.sentences[0];
     w.note = w.note || '';
     w.ai = aiOf(w);
     w.createdAt = Number(w.createdAt) || now();
@@ -184,6 +186,7 @@
     const a = aiOf(w);
     const st = aiStatus(w);
     const gloss = a.inContext || w.translation || (w.definitions && w.definitions[0]) || '';
+    const scenes = w.sentences && w.sentences.length ? w.sentences.length : (w.sentence ? 1 : 0);
     const aiLine = gloss
       ? `<div class="row-ai">${esc(gloss)}</div>`
       : `<div class="row-ai placeholder">${st === 'pending' ? 'AI 正在结合原句讲解…' : st === 'error' ? '讲解失败，点开可重试' : '还没有讲解，点开填写原句后让 AI 讲'}</div>`;
@@ -192,6 +195,7 @@
         <div class="row-head">
           <span class="row-word">${esc(w.word)}</span>
           ${w.phonetic ? `<span class="row-phonetic">${esc(w.phonetic)}</span>` : ''}
+          ${scenes > 1 ? `<span class="row-scenes" title="多个句子场景">${scenes} 个场景</span>` : ''}
           <button class="row-speak" data-act="speak" title="朗读">🔊</button>
         </div>
         <div class="row-sentence">${esc(w.sentence)}</div>
@@ -348,10 +352,21 @@
           body: JSON.stringify({ items: [{ word, sentence: payload.sentence }] }),
         });
         const created = (d.words || []).map(normalize).filter(Boolean);
+        const ids = new Set(created.map((x) => x.id));
+        const ws = new Set(created.map((x) => x.word.toLowerCase()));
+        words = words.filter((x) => !ids.has(x.id) && !ws.has(x.word.toLowerCase()));
         words = created.concat(words);
         $id('editorDialog').close();
         renderAll();
-        toast(created.length === 1 ? `已加入 “${created[0].word}”，正在补释义讲解…` : `已加入 ${created.length} 个词，正在补释义讲解…`, { type: 'success', ms: 4200 });
+        const added = Number(d.added) || 0;
+        const hit = Number(d.hit) || 0;
+        toast(added === 0 && hit > 0
+          ? `“${created[0].word}” 已在词库中（命中，未重复创建）`
+          : hit > 0
+            ? `新增 ${added} 个 · 命中 ${hit} 个（句子场景已并入原词条）`
+            : created.length === 1
+              ? `已加入 “${created[0].word}”，正在补释义讲解…`
+              : `已加入 ${created.length} 个词，正在补释义讲解…`, { type: 'success', ms: 4200 });
       }
     } catch (e) {
       toast(e.message || '保存失败', { type: 'error' });

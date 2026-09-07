@@ -228,19 +228,23 @@ public class Pipeline
         _ai = ai;
     }
 
-    public void ProcessNewAsync(List<JsonObject> created)
+    public void ProcessNewAsync(CreateOutcome outcome)
     {
-        if (created.Count == 0) return;
+        if (outcome == null || outcome.Words.Count == 0) return;
         _ = Task.Run(async () =>
         {
             try
             {
-                var sentence = created.Select(x => x["sentence"]?.GetValue<string>() ?? "")
-                    .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s)) ?? "";
                 var needAi = _ai.Enabled;
+                var newWords = outcome.Words
+                    .Where(w => outcome.NewIds.Contains(w["id"]!.GetValue<string>()))
+                    .ToList();
+                var aiWords = outcome.Words
+                    .Where(w => AiStatus(w) != "done")
+                    .ToList();
                 if (!needAi)
                 {
-                    foreach (var w in created)
+                    foreach (var w in aiWords.Where(w => AiStatus(w) == "pending"))
                     {
                         var id = w["id"]!.GetValue<string>();
                         await _store.MutateWordAsync(id, x =>
@@ -255,7 +259,7 @@ public class Pipeline
                         });
                     }
                 }
-                var lookups = created.Select(async w =>
+                var lookups = newWords.Select(async w =>
                 {
                     var id = w["id"]!.GetValue<string>();
                     var word = w["word"]!.GetValue<string>();
@@ -271,16 +275,28 @@ public class Pipeline
                             x["audio"] = dict["audio"]?.GetValue<string>() ?? "";
                     });
                 }).ToArray();
-                var aiTask = needAi
-                    ? ExplainCoreAsync(sentence, created
-                        .Select(x => (x["id"]!.GetValue<string>(), x["word"]!.GetValue<string>()))
-                        .ToList())
-                    : Task.CompletedTask;
-                var all = lookups.Concat(new[] { aiTask }).ToArray();
+                var aiTasks = new List<Task>();
+                if (needAi && aiWords.Count > 0)
+                {
+                    var groups = aiWords.GroupBy(w => w["sentence"]?.GetValue<string>() ?? "");
+                    foreach (var g in groups)
+                    {
+                        var items = g
+                            .Select(w => (w["id"]!.GetValue<string>(), w["word"]!.GetValue<string>()))
+                            .ToList();
+                        aiTasks.Add(ExplainCoreAsync(g.Key ?? "", items));
+                    }
+                }
+                var all = lookups.Concat(aiTasks).ToArray();
                 await Task.WhenAll(all);
             }
             catch { /* 后台失败由页面状态展示 */ }
         });
+    }
+
+    private static string AiStatus(JsonObject w)
+    {
+        return w["ai"]?["status"]?.GetValue<string>() ?? "none";
     }
 
     public async Task<JsonObject> ExplainSingleAsync(string id)
@@ -401,9 +417,9 @@ public static class WebHost
                 }
             }
             if (items.Count == 0) return JsonResult(new { ok = false, error = "没有有效的单词" }, 400);
-            var created = await store.CreateWordsAsync(items);
-            pipe.ProcessNewAsync(created);
-            return JsonResult(new { ok = true, words = created });
+            var outcome = await store.CreateWordsAsync(items);
+            pipe.ProcessNewAsync(outcome);
+            return JsonResult(new { ok = true, words = outcome.Words, added = outcome.Added, hit = outcome.Hit });
         });
 
         app.MapPost("/api/words", async (HttpContext cx) =>
@@ -412,9 +428,9 @@ public static class WebHost
             var word = (body?["word"]?.GetValue<string>() ?? "").Trim();
             if (word.Length == 0) return JsonResult(new { ok = false, error = "单词不能为空" }, 400);
             var sentence = body?["sentence"]?.GetValue<string>() ?? "";
-            var created = await store.CreateWordsAsync(new List<(string, string)> { (word, sentence) });
-            pipe.ProcessNewAsync(created);
-            return JsonResult(new { ok = true, word = created[0] });
+            var outcome = await store.CreateWordsAsync(new List<(string, string)> { (word, sentence) });
+            pipe.ProcessNewAsync(outcome);
+            return JsonResult(new { ok = true, word = outcome.Words[0], added = outcome.Added, hit = outcome.Hit });
         });
 
         app.MapPatch("/api/words/{id}", async (HttpContext cx, string id) =>

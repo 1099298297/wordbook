@@ -17,7 +17,11 @@ public class Config
     public static Config Load()
     {
         var root = FindRoot();
-        var cfg = new Config { Root = root, DataFile = Path.Combine(root, "data", "words.json") };
+        var dataOverride = Environment.GetEnvironmentVariable("WORDBOOK_DATA_DIR");
+        var dataDir = string.IsNullOrWhiteSpace(dataOverride)
+            ? Path.Combine(root, "data")
+            : dataOverride.Trim();
+        var cfg = new Config { Root = root, DataFile = Path.Combine(dataDir, "words.json") };
         cfg.Reload();
         return cfg;
     }
@@ -62,6 +66,14 @@ public class Config
     }
 }
 
+public class CreateOutcome
+{
+    public List<JsonObject> Words { get; } = new();
+    public HashSet<string> NewIds { get; } = new(StringComparer.Ordinal);
+    public int Added { get; set; }
+    public int Hit { get; set; }
+}
+
 public class DataStore
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -86,12 +98,60 @@ public class DataStore
         };
     }
 
+    private static void MergeDuplicates(JsonObject data)
+    {
+        var arr = (JsonArray)data["words"]!;
+        var seen = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < arr.Count; i++)
+        {
+            if (arr[i] is not JsonObject w) continue;
+            var key = w["word"]?.GetValue<string>() ?? "";
+            if (key.Length == 0) continue;
+            if (!seen.TryGetValue(key, out var keep))
+            {
+                seen[key] = w;
+                continue;
+            }
+
+            EnsureScenes(keep);
+            EnsureScenes(w);
+            var scenes = (JsonArray)keep["sentences"]!;
+            if (w["sentences"] is JsonArray more)
+            {
+                foreach (var s in more)
+                {
+                    if (s != null && !scenes.Any(x =>
+                        x != null && string.Equals(x.GetValue<string>(), s.GetValue<string>(), StringComparison.OrdinalIgnoreCase)))
+                        scenes.Add(s);
+                }
+            }
+            if (string.IsNullOrWhiteSpace(keep["sentence"]?.GetValue<string>())
+                && !string.IsNullOrWhiteSpace(w["sentence"]?.GetValue<string>()))
+                keep["sentence"] = w["sentence"]!.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(keep["translation"]?.GetValue<string>())
+                && !string.IsNullOrWhiteSpace(w["translation"]?.GetValue<string>()))
+                keep["translation"] = w["translation"]!.GetValue<string>();
+            if ((keep["ai"]?["status"]?.GetValue<string>() ?? "") != "done"
+                && (w["ai"]?["status"]?.GetValue<string>() ?? "") == "done")
+                keep["ai"] = (JsonObject)w["ai"]!.DeepClone();
+            if ((keep["definitions"] as JsonArray)?.Count == 0 && w["definitions"] is JsonArray defs)
+                keep["definitions"] = (JsonArray)defs.DeepClone();
+            keep["updatedAt"] = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+            arr.RemoveAt(i);
+            i--;
+        }
+    }
+
     private JsonObject LoadUnsafe()
     {
         try
         {
             var node = JsonNode.Parse(File.ReadAllText(_file));
-            if (node is JsonObject o && o["words"] is JsonArray) return o;
+            if (node is JsonObject o && o["words"] is JsonArray)
+            {
+                MergeDuplicates(o);
+                return o;
+            }
         }
         catch
         {
@@ -132,23 +192,55 @@ public class DataStore
         finally { _gate.Release(); }
     }
 
-    public async Task<List<JsonObject>> CreateWordsAsync(List<(string Word, string Sentence)> items)
+    public async Task<CreateOutcome> CreateWordsAsync(List<(string Word, string Sentence)> items)
     {
         await _gate.WaitAsync();
         try
         {
             var data = LoadUnsafe();
             var arr = (JsonArray)data["words"]!;
-            var created = new List<JsonObject>();
+            var outcome = new CreateOutcome();
             var now = DateTimeOffset.Now.ToUnixTimeMilliseconds();
             foreach (var (word, sentence) in items)
             {
-                var w = NewWord(word, sentence, now);
-                arr.Add(w);
-                created.Add((JsonObject)w.DeepClone());
+                var idx = -1;
+                for (var i = 0; i < arr.Count; i++)
+                {
+                    if (arr[i] is JsonObject o &&
+                        string.Equals(o["word"]?.GetValue<string>(), word, StringComparison.OrdinalIgnoreCase))
+                    {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx >= 0)
+                {
+                    // 命中已有词条：不重复创建、不重复翻译，只追加句子场景
+                    var w = (JsonObject)arr[idx]!;
+                    EnsureScenes(w);
+                    if (!string.IsNullOrWhiteSpace(sentence))
+                    {
+                        var scenes = (JsonArray)w["sentences"]!;
+                        var exists = scenes.Any(s => string.Equals(s?.GetValue<string>(), sentence, StringComparison.OrdinalIgnoreCase));
+                        if (!exists) scenes.Add(sentence);
+                        if (string.IsNullOrWhiteSpace(w["sentence"]?.GetValue<string>()))
+                            w["sentence"] = sentence;
+                    }
+                    w["updatedAt"] = now;
+                    outcome.Hit++;
+                    outcome.Words.Add((JsonObject)w.DeepClone());
+                }
+                else
+                {
+                    var w = NewWord(word, sentence, now);
+                    arr.Add(w);
+                    outcome.Added++;
+                    outcome.NewIds.Add(w["id"]!.GetValue<string>());
+                    outcome.Words.Add((JsonObject)w.DeepClone());
+                }
             }
             SaveUnsafe(data);
-            return created;
+            return outcome;
         }
         finally { _gate.Release(); }
     }
@@ -164,6 +256,9 @@ public class DataStore
             ["definitions"] = new JsonArray(),
             ["audio"] = "",
             ["sentence"] = sentence.Trim(),
+            ["sentences"] = string.IsNullOrWhiteSpace(sentence)
+                ? new JsonArray()
+                : new JsonArray(sentence.Trim()),
             ["note"] = "",
             ["ai"] = new JsonObject { ["status"] = "pending", ["inContext"] = "", ["why"] = "", ["rephrase"] = "", ["tip"] = "", ["error"] = "" },
             ["createdAt"] = now,
@@ -188,6 +283,8 @@ public class DataStore
             CopyScalar(patch, word, "note");
             CopyScalar(patch, word, "audio");
             if (patch["definitions"] is JsonArray defs) word["definitions"] = (JsonArray)defs.DeepClone();
+            EnsureScenes(word);
+            if (patch["sentence"] != null) SyncPrimarySentence(word);
             if (patch["ai"] is JsonObject ai)
             {
                 var target = word["ai"] as JsonObject ?? new JsonObject();
@@ -206,6 +303,35 @@ public class DataStore
     {
         if (from[key] != null && from[key] is not JsonArray && from[key] is not JsonObject)
             to[key] = from[key]?.DeepClone();
+    }
+
+    private static void EnsureScenes(JsonObject word)
+    {
+        var primary = word["sentence"]?.GetValue<string>() ?? "";
+        if (word["sentences"] is not JsonArray scenes)
+        {
+            scenes = new JsonArray();
+            word["sentences"] = scenes;
+            if (!string.IsNullOrWhiteSpace(primary)) scenes.Add(primary);
+        }
+        if (string.IsNullOrWhiteSpace(primary) && scenes.Count > 0)
+            word["sentence"] = scenes[0]?.GetValue<string>() ?? "";
+    }
+
+    private static void SyncPrimarySentence(JsonObject word)
+    {
+        EnsureScenes(word);
+        var primary = word["sentence"]?.GetValue<string>() ?? "";
+        var scenes = (JsonArray)word["sentences"]!;
+        var rest = new List<JsonNode>();
+        foreach (var s in scenes)
+        {
+            if (s != null && !string.Equals(s.GetValue<string>(), primary, StringComparison.OrdinalIgnoreCase))
+                rest.Add(s);
+        }
+        scenes.Clear();
+        if (!string.IsNullOrWhiteSpace(primary)) scenes.Add(primary);
+        foreach (var s in rest) scenes.Add(s);
     }
 
     public async Task<bool> DeleteWordAsync(string id)
@@ -282,9 +408,11 @@ public class DataStore
         if (o["definitions"] is JsonArray defs) w["definitions"] = (JsonArray)defs.DeepClone();
         if (o["note"] != null) w["note"] = o["note"]!.DeepClone();
         if (o["audio"] != null) w["audio"] = o["audio"]!.DeepClone();
+        if (o["sentences"] is JsonArray sentences) w["sentences"] = (JsonArray)sentences.DeepClone();
         if (o["ai"] is JsonObject ai) w["ai"] = (JsonObject)ai.DeepClone();
         if (o["createdAt"] != null) w["createdAt"] = o["createdAt"]!.DeepClone();
         w["updatedAt"] = now;
+        EnsureScenes(w);
         return w;
     }
 
