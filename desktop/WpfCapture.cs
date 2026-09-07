@@ -38,13 +38,20 @@ public class CaptureHost
                 if (_window != null && _window.IsVisible)
                 {
                     Diag.Log("Toggle: closing existing window");
-                    _window.Close();
-                    _window = null;
+                    _window.Hide();
+                    Diag.Log("Toggle: window hidden");
                     return;
                 }
                 Diag.Log("Toggle: creating window");
-                _window = new CaptureWindow(cfg, prevHwnd);
-                _window.Closed += (_, _) => { Diag.Log("Window closed"); _window = null; };
+                if (_window == null)
+                {
+                    _window = new CaptureWindow(cfg, prevHwnd);
+                    _window.Closed += (_, _) => { Diag.Log("Window closed"); _window = null; };
+                }
+                else
+                {
+                    _window.ResetForShow(prevHwnd);
+                }
                 _window.Show();
                 _window.Activate();
                 Diag.Log("Toggle: window shown");
@@ -106,7 +113,7 @@ public class CaptureWindow : Window
     private static readonly Brush MutedBrush = new SolidColorBrush(Color.FromRgb(110, 116, 132));
 
     private readonly Config _cfg;
-    private readonly IntPtr _prevHwnd;
+    private IntPtr _prevHwnd;
     private readonly TextBox _input;
     private readonly TextBlock _hint;
     private readonly ScrollViewer _sentenceScroll;
@@ -254,6 +261,23 @@ public class CaptureWindow : Window
         SourceInitialized += (_, _) =>
             Dispatcher.BeginInvoke(new Action(PositionNearCursor), DispatcherPriority.Loaded);
         Closed += (_, _) => RestoreFocus();
+    }
+
+    public void ResetForShow(IntPtr prevHwnd)
+    {
+        _prevHwnd = prevHwnd;
+        _pollTimer?.Stop();
+        _saved.Clear();
+        _selectedWords.Clear();
+        _isSentenceMode = false;
+        _resultHost.Visibility = Visibility.Collapsed;
+        _input.Visibility = Visibility.Visible;
+        _btnRow.Visibility = Visibility.Visible;
+        _status.Visibility = Visibility.Collapsed;
+        _input.Text = CleanClipboard();
+        _input.Focus();
+        _input.SelectAll();
+        ParseInput();
     }
 
     private static string CleanClipboard()
