@@ -40,7 +40,13 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           <input id="searchInput" type="search" placeholder="搜索单词 / 释义 / 原句…" aria-label="搜索" autocomplete="off">
         </div>
+        <div class="view-switch" id="viewSwitch" role="tablist" aria-label="视图">
+          <button class="view-btn active" data-view="list">词库</button>
+          <button class="view-btn" data-view="wall">单词墙</button>
+          <button class="view-btn" data-view="heat">活跃日历</button>
+        </div>
         <div class="tabs" id="tabs" role="tablist" aria-label="筛选"></div>
+        <button class="date-chip" id="dateChip" hidden></button>
         <label class="sort-wrap">
           排序
           <select id="sortSelect">
@@ -50,9 +56,18 @@
         </label>
       </section>
 
-      <section class="list-wrap">
+      <section class="list-wrap" id="listWrap">
         <div class="word-list" id="wordList"></div>
         <div class="empty-state" id="emptyState" hidden></div>
+      </section>
+
+      <section class="wall-wrap" id="wallWrap" hidden>
+        <div class="wall-grid" id="wallGrid"></div>
+      </section>
+
+      <section class="heat-wrap" id="heatWrap" hidden>
+        <div id="heatChart"></div>
+        <div class="heat-legend" id="heatLegend"></div>
       </section>
 
       <footer class="foot">

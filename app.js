@@ -9,7 +9,7 @@
   const STATUS_LABEL = { done: '已讲解', pending: '讲解中…', error: '待重试', none: '未讲解' };
 
   let words = [];
-  const ui = { filter: 'all', sort: 'newest', query: '' };
+  const ui = { filter: 'all', sort: 'newest', query: '', view: 'list', dateKey: null };
   const editing = { id: null, sceneIndex: 0, busy: false };
   let fileWords = null;
   let confirmResolver = null;
@@ -95,6 +95,13 @@
     return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 周${week}`;
   }
 
+  function dateKey(ts) {
+    const d = new Date(ts);
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${m}-${day}`;
+  }
+
   /* ---------- API ---------- */
   async function api(path, options = {}) {
     const res = await fetch(path, {
@@ -164,6 +171,7 @@
     let list = words.slice();
     const q = ui.query.trim().toLowerCase();
     if (ui.filter !== 'all') list = list.filter((w) => wordAiStatus(w) === ui.filter);
+    if (ui.dateKey) list = list.filter((w) => w.sentences.some((s) => dateKey(s.addedAt) === ui.dateKey));
     if (q) {
       list = list.filter((w) => {
         const hay = [w.word, w.phonetic, w.translation, w.note]
@@ -257,10 +265,111 @@
     box.innerHTML = html;
   }
 
+  function renderWall() {
+    const grid = $id('wallGrid');
+    const list = getFiltered();
+    if (words.length === 0) {
+      grid.innerHTML = '<div class="heat-empty">词库还空着，先去记几个词吧。</div>';
+      return;
+    }
+    if (list.length === 0) {
+      grid.innerHTML = '<div class="heat-empty">没有匹配的单词。</div>';
+      return;
+    }
+    grid.innerHTML = list.map((w) => {
+      const n = w.sentences.length;
+      return `<span class="wall-word" data-id="${esc(w.id)}" title="${esc(w.word)}${n > 1 ? ' · ' + n + ' 句' : ''}">${esc(w.word)}${n > 1 ? `<span class="n">${n}</span>` : ''}</span>`;
+    }).join('');
+  }
+
+  function heatLevel(n) {
+    if (n >= 8) return 4;
+    if (n >= 4) return 3;
+    if (n >= 2) return 2;
+    if (n >= 1) return 1;
+    return 0;
+  }
+
+  function renderHeat() {
+    const chart = $id('heatChart');
+    if (words.length === 0) {
+      chart.innerHTML = '<div class="heat-empty">还没有记录，先记几个词，这里会出现你的“活跃日历”。</div>';
+      $id('heatLegend').innerHTML = '';
+      return;
+    }
+    const counts = {};
+    let earliest = now();
+    words.forEach((w) => w.sentences.forEach((s) => {
+      const key = dateKey(s.addedAt);
+      counts[key] = (counts[key] || 0) + 1;
+      if (s.addedAt < earliest) earliest = s.addedAt;
+    }));
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todaySunday = new Date(today);
+    todaySunday.setDate(todaySunday.getDate() - todaySunday.getDay());
+
+    let start = new Date(Math.min(earliest, today.getTime() - 364 * DAY));
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - start.getDay());
+
+    const weeks = [];
+    for (let cur = new Date(start); cur <= todaySunday; cur.setDate(cur.getDate() + 7)) {
+      const week = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(cur);
+        d.setDate(d.getDate() + i);
+        week.push({ d, count: counts[dateKey(d.getTime())] || 0 });
+      }
+      weeks.push(week);
+    }
+
+    const monthLabels = [];
+    let lastMonth = -1;
+    weeks.forEach((week, wi) => {
+      const m = week[0].d.getMonth();
+      if (m !== lastMonth) {
+        monthLabels.push(`<span style="grid-column:${wi + 1}">${week[0].d.getFullYear() === today.getFullYear() ? '' : week[0].d.getFullYear() + ' '}${m + 1}月</span>`);
+        lastMonth = m;
+      }
+    });
+    const dayLabels = ['', '一', '', '三', '', '五', ''];
+    chart.innerHTML = `
+      <div class="heat-month" style="display:grid;grid-template-columns:repeat(${weeks.length},15px)">${monthLabels.join('')}</div>
+      <div class="heat-row">
+        <div class="heat-day-labels">${dayLabels.map((x) => `<span>${x}</span>`).join('')}</div>
+        <div class="heat-grid">${weeks.flatMap((week) => week.map((c) => `
+          <div class="heat-cell h${heatLevel(c.count)}" data-date="${dateKey(c.d.getTime())}" data-count="${c.count}"
+               title="${dateKey(c.d.getTime())} · ${c.count} 条记录"></div>`)).join('')}
+        </div>
+      </div>`;
+    $id('heatLegend').innerHTML = `<span>少</span>
+      ${[0, 1, 2, 3, 4].map((l) => `<span class="heat-cell h${l}"></span>`).join('')}
+      <span>多</span>`;
+  }
+
+  function renderCurrent() {
+    const listWrap = $id('listWrap');
+    const wallWrap = $id('wallWrap');
+    const heatWrap = $id('heatWrap');
+    listWrap.hidden = ui.view !== 'list';
+    wallWrap.hidden = ui.view !== 'wall';
+    heatWrap.hidden = ui.view !== 'heat';
+    $$('.view-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === ui.view));
+    if (ui.view === 'list') renderList();
+    else if (ui.view === 'wall') renderWall();
+    else renderHeat();
+
+    const chip = $id('dateChip');
+    chip.hidden = !ui.dateKey;
+    if (ui.dateKey) chip.textContent = `只看 ${ui.dateKey} ✕`;
+  }
+
   function renderAll() {
     renderStats();
     renderTabs();
-    renderList();
+    renderCurrent();
   }
 
   /* ---------- 朗读 ---------- */
@@ -597,15 +706,25 @@
     let searchTimer = null;
     $id('searchInput').addEventListener('input', (e) => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => { ui.query = e.target.value; renderList(); }, 140);
+      searchTimer = setTimeout(() => { ui.query = e.target.value; renderCurrent(); }, 140);
     });
-    $id('sortSelect').addEventListener('change', (e) => { ui.sort = e.target.value; renderList(); });
+    $id('sortSelect').addEventListener('change', (e) => { ui.sort = e.target.value; renderCurrent(); });
     $id('tabs').addEventListener('click', (e) => {
       const btn = e.target.closest('.tab');
       if (!btn) return;
       ui.filter = btn.dataset.filter;
       renderTabs();
-      renderList();
+      renderCurrent();
+    });
+    $id('viewSwitch').addEventListener('click', (e) => {
+      const btn = e.target.closest('.view-btn');
+      if (!btn) return;
+      ui.view = btn.dataset.view;
+      renderAll();
+    });
+    $id('dateChip').addEventListener('click', () => {
+      ui.dateKey = null;
+      renderAll();
     });
 
     $id('wordList').addEventListener('click', (e) => {
@@ -630,6 +749,18 @@
     $id('wordList').addEventListener('keydown', (e) => {
       const row = e.target.closest('.word-row');
       if (row && e.key === 'Enter') { e.preventDefault(); openEditor(row.dataset.id); }
+    });
+    $id('wallGrid').addEventListener('click', (e) => {
+      const chip = e.target.closest('.wall-word');
+      if (chip) openEditor(chip.dataset.id);
+    });
+    $id('heatChart').addEventListener('click', (e) => {
+      const cell = e.target.closest('.heat-cell');
+      if (!cell || Number(cell.dataset.count) === 0) return;
+      ui.dateKey = cell.dataset.date;
+      ui.view = 'list';
+      renderAll();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     });
 
     $id('wordForm').addEventListener('submit', (e) => { e.preventDefault(); submitEditor(); });
