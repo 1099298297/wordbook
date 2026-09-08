@@ -61,7 +61,7 @@ public class TrayApp : ApplicationContext
 
         _icon = new NotifyIcon
         {
-            Icon = MakeIcon(),
+            Icon = MakeIcon(cfg),
             Text = "生词本 - Ctrl+Alt+Shift+W 记录",
             Visible = true,
         };
@@ -153,20 +153,15 @@ public class TrayApp : ApplicationContext
         ExitThread();
     }
 
-    private static Icon MakeIcon()
+    private static Icon MakeIcon(Config cfg)
     {
-        using var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
+        try
         {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(Color.FromArgb(91, 91, 240));
-            g.FillEllipse(brush, 0, 0, 32, 32);
-            using var pen = new Pen(Color.White, 2.4f);
-            g.DrawArc(pen, 7, 8, 8, 16, 210, 230);
-            g.DrawArc(pen, 17, 8, 8, 16, -80, 230);
-            g.DrawLine(pen, 16, 8, 16, 24);
+            var ico = Path.Combine(cfg.Root, "assets", "wordbook.ico");
+            if (File.Exists(ico)) return new Icon(ico);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+        catch { /* 图标缺失时用系统图标兜底 */ }
+        return SystemIcons.Application;
     }
 }
 
